@@ -1,0 +1,45 @@
+# Histórico de versões
+
+## 0.11
+- **Controle nos menus do início**: tela inicial, Carregar jogo e Configuração funcionam com o controle (antes só com o mouse). Direcional ou analógico pula de item em item, A/Start confirma, B volta; ao escolher um jogo salvo, o foco vai para "Carregar" (`menu_navigation`).
+
+## 0.10
+- **Letras e HUD em HD**: fonte, números, ícones e desenhos da pausa redesenhados em 4× com xBR, gerados na hora a partir das texturas do jogo (`hd_textures`).
+- **Botões do Xbox nas dicas**: com o controle conectado, o jogo mostra Ⓐ Ⓑ Ⓧ Ⓨ, LB, RB, BACK e Menu no lugar das teclas; ao desconectar, as teclas voltam na hora (`button_prompts`).
+- **Menus 2D em tela cheia**: laterais com fundo desfocado (`menu_fill`) e textos na resolução do monitor (`hires_menu`).
+- **Correção**: as telas Vídeo e Controles do menu mostravam só um item.
+- **Correção**: com o "Brilho" do menu Vídeo diferente de quando a lista foi feita, a fonte HD e os ícones do controle não apareciam (as texturas eram reconhecidas pelas cores). Agora são reconhecidas pelo desenho, com qualquer ajuste de cor.
+- **Correção**: texturas de personagens podiam herdar a marca HD de uma textura antiga com o mesmo número (o jogo reaproveita os números). Agora as marcas são esquecidas quando a textura é apagada ou reenviada, e cada atualização parcial confere o tamanho real.
+- Texturas de efeitos e cenário que tinham entrado na lista HD por engano foram tiradas (só fonte e HUD).
+- **Diagnóstico**: com `debug=1`, F8 finge controle desconectado/conectado; `debug=2` registra cada textura; `dump_textures` grava a assinatura usada pela lista.
+
+## 0.9
+- **LOD dos modelos**: personagens e objetos mantêm o modelo detalhado até 4× mais longe antes de trocar pelo simplificado (`lod_distance`).
+- **Pós-processamento opcional** (`[postfx]`): bloom, nitidez adaptativa (CAS), saturação, contraste e vinheta, em shaders GLSL aplicados à imagem interna.
+- **HUD alinhado no widescreen**: os ícones 3D (cenoura, moeda de ouro) voltam para junto dos contadores, no 4:3 central.
+- **Compatibilidade**:
+  - Antisserrilhado e efeitos tentam configurações mais leves se a placa recusar (memória, limites, falta de shaders).
+  - Monitores 4K ficam sem supersampling.
+  - Os objetos de vídeo são liberados ao trocar de configuração.
+  - Mipmaps e anisotropia só são usados se a placa suportar.
+- **`config.pc` ajustado em memória** logo depois que o jogo o lê: a resolução certa já vale na primeira execução, e o renderizador volta para OpenGL se o jogo tiver caído para Direct3D/software (`force_opengl`).
+- **Pasta portátil**: o jogo passa a usar a pasta de onde está rodando (`config.pc` e saves na própria `bin`), mesmo que o registro aponte para outra instalação.
+- **Diagnóstico**: com `debug=1`, F9 alterna entre as distâncias originais e as do mod, e F11 liga e desliga os efeitos.
+
+## 0.8
+- **Itens e personagens aparecem de mais longe**: o alcance de ativação dos objetos é multiplicado (`object_distance`, padrão 200%).
+- **Widescreen sem objetos sumindo nas laterais**: os três testes de frustum da lista de visão foram corrigidos para a tela larga.
+- **Reconhecimento estrito do executável** (CRC32 do `bblit2.exe` brasileiro). Em outras versões, o mod se desliga sozinho.
+- **Funciona sem o jogo instalado**: se a chave do registro não existir, a DLL responde com a pasta do jogo.
+- **Qualidade automática** (`auto_quality`): se o PC não segurar 30 fps durante o jogo, o antisserrilhado é reduzido.
+- Monitores 5:4 ficam em 4:3, com faixas em cima e embaixo.
+
+## 0.7 e anteriores
+- Proxy `dinput.dll`: correções em memória, nenhum arquivo do jogo alterado.
+- Tela cheia na resolução do monitor, sem trocar o modo de vídeo e sem exigir área de trabalho em 16 bits.
+- Widescreen Hor+, com menus 2D em 4:3 ampliados e mouse mapeado.
+- Antisserrilhado por FBO (MSAA 4× + supersampling 2×), mipmaps e filtro anisotrópico 16×.
+- Distância de visão até 4×, com buffers do motor 4× maiores.
+- Controle XInput somado ao teclado do jogo, com câmera no analógico direito e inversão configurável.
+- Idioma e falas em português detectados pelo CD.
+- Jogo continua rodando sem foco (Alt+Tab e outro monitor).
