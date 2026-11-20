@@ -8,11 +8,11 @@ Inspirado no [BBLIT Remaster](https://github.com/InLineR495/BBLIT-Remaster) (par
 
 ## Antes e depois
 
-Capturas no próprio jogo, em 2560×1440 (v0.9 e v0.10).
+Capturas no próprio jogo, em 2560×1440 (v0.9 a v0.12).
 
 | | Antes | Depois |
 |---|---|---|
-| **Tela inicial** (v0.10) | ![menu original](docs/menu_antes.jpg) | ![menu do mod](docs/menu_depois.jpg) |
+| **Tela inicial** (v0.12, 16:9 de verdade) | ![menu original](docs/menu_antes.jpg) | ![menu do mod](docs/menu_depois.jpg) |
 | **Pausa com o controle conectado** (v0.10: fonte HD e botões do Xbox) | ![pausa original](docs/pausa_antes.jpg) | ![pausa do mod](docs/pausa_depois.jpg) |
 | **Efeitos de imagem** (mesmo quadro) | ![sem efeitos](docs/efeitos_antes.jpg) | ![com efeitos](docs/efeitos_depois.jpg) |
 | **Itens surgindo do nada** (mesmo lugar; o item azul à esquerda) | ![distância original](docs/objetos_original.jpg) | ![distância do mod](docs/objetos_mod.jpg) |
@@ -33,7 +33,8 @@ Resumo em imagens: [`docs/comparacao_v010.png`](docs/comparacao_v010.png) e [`do
 - **HUD alinhado**: no widescreen, os ícones 3D (cenoura, moeda de ouro) ficam junto dos contadores, no 4:3 central.
 - **Pós-processamento opcional**: brilho suave nas luzes (bloom), nitidez adaptativa (CAS), saturação, contraste e vinheta. Tudo regulável ou desligável no ini.
 - **Letras e HUD em HD**: a fonte do jogo, os números, ícones e desenhos da pausa são redesenhados em 4× com contorno liso (xBR, feito na hora pelo mod a partir das texturas do próprio jogo; nenhum arquivo de textura é distribuído). As texturas são reconhecidas pelo desenho, e não pelas cores, então funciona com qualquer ajuste de "Brilho" do menu Vídeo.
-- **Menus 2D em tela cheia**: a tela inicial e as telas de configuração ocupam a altura toda, com as laterais preenchidas por um fundo desfocado (em vez de barras pretas), e os textos são desenhados direto na resolução do monitor.
+- **Menus 2D em 16:9 de verdade**: a tela inicial, as de configuração, a de carregar e as aberturas ocupam a tela inteira sem esticar nada. O mod mede o fundo de anéis do próprio jogo (centro, achatamento e a cor de cada anel) e continua o desenho até as bordas; nas aberturas, a cor lisa do fundo. Cada fundo fica pronto assim que o jogo carrega a imagem, então ao trocar de menu a tela 16:9 aparece inteira de uma vez. Os textos são desenhados direto na resolução do monitor, e nomes que ficavam encavalados em português ("Carregar Jogo" em cima de "Configuração") são desenhados um pouco mais estreitos.
+- **Pacote HD dos menus (opcional)**: o script `tools/hd_menu/make_pack.py` amplia 4× os ícones, logos e fundos dos menus com o Real-ESRGAN, a partir dos arquivos do seu jogo, e pode deixar a tela inicial no mesmo azul escuro da tela de configuração. O mod usa a pasta `bin\hd` sozinho e mistura cada ícone ao fundo pronto, sem retângulo em volta. Veja [tools/hd_menu](tools/hd_menu/README.md).
 - **Telas Vídeo e Controles** do menu voltam a mostrar todos os itens (com a imagem ampliada, o jogo só redesenhava um item de cada vez).
 - **Qualidade automática**: se o PC não segurar 30 quadros por segundo, o mod reduz o antisserrilhado sozinho.
 
@@ -108,7 +109,8 @@ Para desinstalar, apague `dinput.dll` (e, se quiser, `bblit2fix.ini` e `bblit2fi
 | `native_res` | `[video]` | 1 | Grava no `config.pc` a resolução certa para o monitor |
 | `vsync` | `[video]` | 1 | Sincronia vertical |
 | `hd_textures` | `[video]` | 1 | Fonte, HUD e desenhos da pausa em 4× (xBR) |
-| `menu_fill` | `[video]` | 1 | Telas 2D: 1 = tela cheia com laterais desfocadas, 2 = esticadas, 0 = barras pretas |
+| `menu_fill` | `[video]` | 3 | Telas 2D: 3 = 16:9 com o fundo continuando até as bordas, 1 = laterais desfocadas, 2 = esticadas, 0 = barras pretas |
+| `menu_hd` | `[video]` | 1 | Usa o pacote HD dos menus (pasta `hd`), se existir |
 | `hires_menu` | `[video]` | 1 | Textos dos menus 2D na resolução do monitor |
 | `button_prompts` | `[pad]` | 2 | Dicas com o controle conectado: 2 = ícones do Xbox, 1 = nomes (A, B, LB…), 0 = teclas |
 | `menu_navigation` | `[pad]` | 1 | Controle nos menus do início (direcional/analógico, A/Start, B volta) |
@@ -150,7 +152,7 @@ Com `debug=1` (seção `[fix]`), algumas teclas ajudam a comparar: **F9** altern
 - Texturas HD: no `glTexImage2D` (e no `glTexSubImage2D` que preenche a textura inteira), cada textura recebe uma assinatura do desenho: alfa e número de cada cor na ordem em que aparece, sem as cores em si. O ajuste de cor do menu Vídeo (matiz/brilho/saturação aplicados às paletas em `0x407d30`) muda as cores, mas não o desenho; um gancho nessa função impede que duas cores diferentes virem uma só. As que estão na lista são ampliadas em 4× por xBR (regras do Hyllian, implementação própria) e enviadas no lugar; atualizações parciais seguintes vão na posição ×4. Os nomes de textura são esquecidos ao serem apagados ou reenviados, e cada pedaço confere o tamanho real da textura.
 - Botões do Xbox: o texto do jogo pede o caractere da tecla na operação `0x14` (`0x467667`); com o controle conectado, o mod devolve o caractere de um símbolo do PlayStation que existe na fonte e não é usado no PC (✕ ○ □ △ L1 R1 "START"), e a textura desse símbolo é trocada por um ícone desenhado na hora. Enter e Esc têm as duas versões guardadas e trocam ao conectar/desconectar.
 - Controle nos menus do início: cada tela é uma lista de painéis (`[0x639324 + 36 × menu]`, encadeados em `+0x18`) com itens de tipo, retângulo (640×480) e estado; o mod escolhe o vizinho na direção apertada, põe o cursor no centro dele (o jogo realça como faria com o mouse) e manda o clique. As linhas da lista de jogos salvos têm 22 pixels.
-- Menus 2D: as chamadas GDI do menu são desenhadas numa tela virtual na resolução do monitor (fontes escaladas, recorte do `BeginPaint` respeitado) e copiadas para a janela, com as laterais preenchidas por uma versão desfocada da própria imagem.
+- Menus 2D: as chamadas GDI do menu são desenhadas numa tela virtual na resolução do monitor (fontes escaladas, recorte do `BeginPaint` respeitado) e copiadas para a janela. Cada bitmap 640×480 que o jogo carrega (`LoadImageA`) é medido na hora: um modelo de anéis elípticos (centro e achatamento por busca, com uma segunda passada que ignora painéis e ícones desenhados na própria imagem; cor de cada raio pela mediana; período dos anéis por autocorrelação para ir além do último raio medido) ou cor lisa. Com isso o mod monta uma imagem do tamanho da janela (o bitmap ampliado no meio e os anéis continuando nas laterais) e, quando o jogo desenha o fundo, copia dessa imagem: a tela 16:9 sai inteira de uma vez. Ficam prontas no máximo 3 dessas imagens e elas são liberadas durante as fases. Fundos que não são reconhecidos ficam com as laterais desfocadas. Com o pacote HD, o meio vem da imagem 4× (`hd\<nome>.bmp`), o perfil dos anéis das laterais é medido de novo nela (faixas 4× mais finas, para as bordas ficarem tão nítidas quanto o meio), e `hd\1x\<nome>.bmp` substitui a imagem original na medição e nos ícones. Os ícones do jogo trazem um pedaço do fundo desenhado junto: o mod compara o ícone com o fundo na posição em que ele é desenhado e, onde é só fundo, usa a imagem pronta.
 
 ## Compilação
 

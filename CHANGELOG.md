@@ -1,5 +1,11 @@
 # Histórico de versões
 
+## 0.12
+- **Menus em 16:9 de verdade**: as telas 2D (inicial, configuração, carregar e aberturas) ocupam a tela inteira sem esticar. Cada fundo do jogo é medido assim que o jogo carrega a imagem e vira uma tela 16:9 pronta (os anéis continuam até as bordas; nas aberturas, a cor lisa do fundo). Ao trocar de menu, a tela inteira aparece de uma vez, sem as laterais preenchendo depois (`menu_fill=3`, novo padrão).
+- **Pacote HD dos menus (opcional)**: `tools/hd_menu/make_pack.py` gera a pasta `bin\hd` com os ícones, logos e fundos dos menus ampliados 4× pelo Real-ESRGAN (anime 6B, via onnxruntime) a partir dos arquivos do jogo. A tela inicial pode ficar no azul escuro da tela de configuração (recolorindo também o fundo desenhado nos ícones dela). O mod mistura cada ícone ao fundo pronto e mede o perfil dos anéis na própria imagem HD (`menu_hd=1`).
+- Nomes dos ícones que se encostavam em português ("Carregar Jogo" e "Configuração") são desenhados um pouco mais estreitos, no mesmo lugar.
+- Compilação com SSE2.
+
 ## 0.11
 - **Controle nos menus do início**: tela inicial, Carregar jogo e Configuração funcionam com o controle (antes só com o mouse). Direcional ou analógico pula de item em item, A/Start confirma, B volta; ao escolher um jogo salvo, o foco vai para "Carregar" (`menu_navigation`).
 

@@ -5,3 +5,5 @@ build/
 *.bze
 *.BZE
 *.xa
+tools/hd_menu/cache/
+__pycache__/

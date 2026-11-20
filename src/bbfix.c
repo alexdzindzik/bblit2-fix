@@ -16,12 +16,12 @@
 #include <math.h>
 #include <GL/gl.h>
 
-#define FIX_VERSION "0.11"
+#define FIX_VERSION "0.12"
 
 // ---------------------------------------------------------------- config / log
 static struct {
-    int enabled, log_gl, aspect, msaa, vsync, xinput, unlock_joy, a_enter, deadzone, cam_stick, swap_ab, language, game_res, background, debug, inv_stick, inv_trig, draw_dist, ssaa, mipmaps, aniso, actor_dist, auto_quality, lod_dist, force_gl, dump_tex, hd_tex, pad_prompts, menu_fill, hires_menu, menu_pad;
-} cfg = { 1, 1, 2, 4, 1, 1, 0, 1, 30, 1, 0, -1, 1, 1, 0, 1, 1, 400, 2, 1, 16, 200, 1, 400, 1, 0, 1, 2, 1, 1, 1 };
+    int enabled, log_gl, aspect, msaa, vsync, xinput, unlock_joy, a_enter, deadzone, cam_stick, swap_ab, language, game_res, background, debug, inv_stick, inv_trig, draw_dist, ssaa, mipmaps, aniso, actor_dist, auto_quality, lod_dist, force_gl, dump_tex, hd_tex, pad_prompts, menu_fill, hires_menu, menu_pad, menu_hd;
+} cfg = { 1, 1, 2, 4, 1, 1, 0, 1, 30, 1, 0, -1, 1, 1, 0, 1, 1, 400, 2, 1, 16, 200, 1, 400, 1, 0, 1, 2, 1, 1, 1, 1 };
 // pós-processamento [postfx]: valores em %
 static struct { int on, bloom, threshold, sharpen, saturation, contrast, vignette; } fx = { 1, 25, 70, 40, 110, 105, 20 };
 
@@ -79,7 +79,8 @@ static void load_config(void) {
     cfg.force_gl  = ini_int("video", "force_opengl", 1);
     cfg.dump_tex  = ini_int("fix", "dump_textures", 0);
     cfg.hd_tex    = ini_int("video", "hd_textures", 1);
-    cfg.menu_fill = ini_int("video", "menu_fill", 1);
+    cfg.menu_fill = ini_int("video", "menu_fill", 3);
+    cfg.menu_hd = ini_int("video", "menu_hd", 1);
     cfg.hires_menu = ini_int("video", "hires_menu", 1);
     cfg.pad_prompts = ini_int("pad", "button_prompts", 2);
     fx.on         = ini_int("postfx", "enabled", 1);
@@ -211,6 +212,7 @@ static void map_rect(GLint *x, GLint *y, GLsizei *w, GLsizei *h) {
 }
 static HDC g_vdc;
 static void present_2d(int force);
+static void bg_release(void);
 static int is_game_dc(HDC dc) { return g_hwnd && dc && WindowFromDC(dc) == g_hwnd; }
 static int is_game_wnd(HWND w) { return g_hwnd && w == g_hwnd; }
 
@@ -868,7 +870,7 @@ static BOOL WINAPI h_wglMakeCurrent(HDC dc, HGLRC rc) {
     BOOL r = r_wglMakeCurrent(dc, rc);
     if (r) {
         int on = rc && dc && WindowFromDC(dc) == g_hwnd;
-        if (on != g_gl_on) { g_gl_on = on; logf_("OpenGL %s na janela", on ? "ativo" : "inativo"); if (!on) present_2d(1); }
+        if (on != g_gl_on) { g_gl_on = on; logf_("OpenGL %s na janela", on ? "ativo" : "inativo"); if (on) bg_release(); else present_2d(1); }
         if (!on) { g_S = 1; g_fbo_ok = 0; }
         else if (rc != g_fbo_rc) fbo_setup(rc);     // uma tentativa por contexto (com degraus se falhar)
         else fbo_rebind();
@@ -1814,6 +1816,261 @@ static HBITMAP dib32(HDC dc, int w, int h, DWORD **bits) {
     bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
     return CreateDIBSection(dc, &bi, DIB_RGB_COLORS, (void **)bits, NULL, 0);
 }
+// ---- laterais que continuam o fundo (menu_fill=3): os fundos das telas 2D são anéis concêntricos (levemente
+// achatados) ou uma cor lisa. O mod mede isso na própria tela (centro, achatamento e a cor de cada raio, com a
+// mediana para ignorar o que estiver desenhado por cima) e desenha a continuação nas laterais: 16:9 de verdade.
+// Fundo que não é nenhum dos dois: volta ao desfoque (menu_fill=1).
+static BYTE *fe_menu(void);
+#define BG_BIN 0.5
+#define BG_NB 1400
+typedef struct { int kind; double cx, cy, sx, P, rmax; int nb; float prof[BG_NB][3]; DWORD solid[4]; DWORD sig[48];
+                 float (*hp)[3]; int hnb; double hbin; } BGMODEL;      // hp: perfil medido na imagem HD (faixas finas)
+static BGMODEL g_bgm[6]; static int g_bgm_n, g_bgm_cur = -1, g_bgm_drawn = -1, g_bgm_dw, g_bgm_dh;
+static HDC g_gdc; static HBITMAP g_gbmp, g_gold; static DWORD *g_gbits; static int g_gbw, g_gbh;
+static int bg_lum(DWORD v) { return ((v & 255) * 29 + (v >> 8 & 255) * 150 + (v >> 16 & 255) * 77) >> 8; }
+static float bg_cost(const float *xs, const float *ys, const float *ls, int n, double cx, double cy, double sx) {
+    static float sum[700]; static int cnt[700]; static short bins[9000];
+    memset(sum, 0, sizeof sum); memset(cnt, 0, sizeof cnt);
+    float fcx = (float)cx, fcy = (float)cy, fsx = (float)sx;
+    for (int i = 0; i < n; i++) {
+        float dx = (xs[i] - fcx) * fsx, dy = ys[i] - fcy; int b = (int)sqrtf(dx * dx + dy * dy);
+        if (b >= 700) b = 699;
+        bins[i] = (short)b; sum[b] += ls[i]; cnt[b]++;
+    }
+    for (int b = 0; b < 700; b++) if (cnt[b]) sum[b] /= cnt[b];
+    float c = 0;
+    for (int i = 0; i < n; i++) { float d = fabsf(ls[i] - sum[bins[i]]); c += d < 30 ? d : 30; }
+    return c / (n ? n : 1);
+}
+static float bg_med(float *a, int n) {                // mediana (seleção parcial)
+    int k = n / 2, lo = 0, hi = n - 1;
+    while (lo < hi) {
+        float piv = a[(lo + hi) / 2]; int i = lo, j = hi;
+        while (i <= j) { while (a[i] < piv) i++; while (a[j] > piv) j--; if (i <= j) { float t = a[i]; a[i] = a[j]; a[j] = t; i++; j--; } }
+        if (k <= j) hi = j; else if (k >= i) lo = i; else break;
+    }
+    return a[k];
+}
+static void bg_binmean(const float *xs, const float *ys, const float *ls, int n, double cx, double cy, double sx, float *mean) {
+    static int cnt[700]; memset(cnt, 0, sizeof cnt); memset(mean, 0, 700 * sizeof *mean);
+    float fcx = (float)cx, fcy = (float)cy, fsx = (float)sx;
+    for (int i = 0; i < n; i++) {
+        float dx = (xs[i] - fcx) * fsx, dy = ys[i] - fcy; int b = (int)sqrtf(dx * dx + dy * dy);
+        if (b >= 700) b = 699;
+        mean[b] += ls[i]; cnt[b]++;
+    }
+    for (int b = 0; b < 700; b++) mean[b] = cnt[b] ? mean[b] / cnt[b] : -1000.0f;
+}
+// quanto a luminância l foge do perfil médio no raio r (descontando a inclinação: nas bordas dos anéis a cor muda rápido)
+static float bg_dev(const float *mean, float r, float l) {
+    float f = r - 0.5f; int b = (int)f; if (b < 0) b = 0; if (b > 698) b = 698;
+    float t = f - b; if (t < 0) t = 0; if (t > 1) t = 1;
+    float a = mean[b], c = mean[b + 1];
+    if (a < -500) a = c; if (c < -500) c = a;
+    if (a < -500) return 0;
+    return fabsf(l - (a + (c - a) * t)) - fabsf(c - a) * 0.75f;
+}
+// clean = imagem do fundo sem nada do menu por cima (lida do bitmap que o jogo carregou)
+static int bg_fit(const DWORD *px, int w, int h, BGMODEL *m, int clean) {
+    static BYTE ex[480][640];
+    if (w != 640 || h != 480) return 0;
+    memset(ex, 0, sizeof ex);
+    BYTE *d = clean ? NULL : fe_menu();               // o que o menu desenha por cima não entra na medida
+    for (int pn = 0; d && pn < 16 && !IsBadReadPtr(d, 0x20); pn++, d = *(BYTE **)(d + 0x18)) {
+        BYTE *it = *(BYTE **)(d + 8);
+        for (int k = 0; it && k < 96 && !IsBadReadPtr(it, 0x118); k++, it = *(BYTE **)(it + 0x110)) {
+            int x0 = *(int *)(it + 0x70) - 4, y0 = *(int *)(it + 0x74) - 4, x1 = x0 + *(int *)(it + 0x78) + 8, y1 = y0 + *(int *)(it + 0x7c) + 8;
+            if (*(int *)(it + 0x6c) == 4) { x0 -= 24; x1 += 24; y1 += 34; }   // imagem: o nome vai escrito embaixo
+            if (x1 - x0 <= 8 || y1 - y0 <= 8) continue;
+            if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > 640) x1 = 640; if (y1 > 480) y1 = 480;
+            for (int y = y0; y < y1; y++) memset(&ex[y][x0 < 640 ? x0 : 640], 1, x1 > x0 ? x1 - x0 : 0);
+        }
+    }
+    // cor lisa nas bordas (telas de abertura)
+    double ss[2][4] = { { 0 } }; int ok = 1;
+    for (int side = 0; side < 2 && ok; side++) {
+        double a[3] = { 0 }, a2 = 0, al = 0; int n = 0;
+        for (int y = 0; y < h; y++) for (int x = side ? w - 6 : 0; x < (side ? w : 6); x++) {
+            DWORD v = px[y * w + x]; int l = bg_lum(v);
+            a[0] += v & 255; a[1] += v >> 8 & 255; a[2] += v >> 16 & 255; al += l; a2 += (double)l * l; n++;
+        }
+        double mean = al / n, var = a2 / n - mean * mean;
+        if (var > 6.0) ok = 0;
+        for (int c = 0; c < 3; c++) ss[side][c] = a[c] / n;
+    }
+    if (ok) {
+        m->kind = 1;
+        for (int side = 0; side < 2; side++) m->solid[side] = (DWORD)(ss[side][0] + 0.5) | (DWORD)(ss[side][1] + 0.5) << 8 | (DWORD)(ss[side][2] + 0.5) << 16;
+        m->solid[2] = m->solid[0]; m->solid[3] = m->solid[1];
+        return 1;
+    }
+    // anéis: amostras das faixas laterais
+    static float xs[9000], ys[9000], ls[9000];
+    int tot = 0;
+    for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) if ((x < 110 || x >= 530) && !ex[y][x]) tot++;
+    if (tot < 2000) return 0;
+    int step = tot / 8000 + 1, n = 0, q = 0;
+    for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) if ((x < 110 || x >= 530) && !ex[y][x]) {
+        if (q++ % step) continue;
+        if (n < 9000) { xs[n] = x + 0.5f; ys[n] = y + 0.5f; ls[n] = (float)bg_lum(px[y * w + x]); n++; }
+    }
+    double bx = 320, by = 240, bs = 1.0; float bc = 1e9f;
+    for (int cy = 150; cy <= 410; cy += 16) for (int cx = 240; cx <= 400; cx += 16) {
+        float c = bg_cost(xs, ys, ls, n, cx, cy, 1.0);
+        if (c < bc) { bc = c; bx = cx; by = cy; }
+    }
+    static const double st[] = { 8, 4, 2, 1, 0.5, 0.25 }, sst[] = { 0.02, 0.02, 0.01, 0.005, 0.0025, 0.0025 };
+    for (int si = 0; si < 6; si++) {
+        for (int it = 0, moved = 1; moved && it < 40; it++) {
+            moved = 0;
+            for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) for (int dz = -1; dz <= 1; dz++) {
+                if (!dx && !dy && !dz) continue;
+                double cx = bx + dx * st[si], cy = by + dy * st[si], sx = bs + dz * sst[si];
+                if (sx < 0.8 || sx > 1.25) continue;
+                float c = bg_cost(xs, ys, ls, n, cx, cy, sx);
+                if (c < bc - 1e-4f) { bc = c; bx = cx; by = cy; bs = sx; moved = 1; }
+            }
+        }
+    }
+    // segunda passada sem o que não segue os anéis (painel, setas e ícones desenhados na própria imagem)
+    static float bmean[700]; int n0 = n;
+    bg_binmean(xs, ys, ls, n, bx, by, bs, bmean);
+    { int k = 0;
+      for (int i = 0; i < n; i++) {
+          float dx = (xs[i] - (float)bx) * (float)bs, dy = ys[i] - (float)by;
+          if (bg_dev(bmean, sqrtf(dx * dx + dy * dy), ls[i]) <= 10.0f) { xs[k] = xs[i]; ys[k] = ys[i]; ls[k] = ls[i]; k++; }
+      }
+      if (k < n0 * 6 / 10 || k < 1500) { static int nr; if (nr++ < 16) logf_("fundo 2D: so %d de %d pontos seguem aneis", k, n0); return 0; }
+      n = k; }
+    bc = bg_cost(xs, ys, ls, n, bx, by, bs);
+    for (int si = 2; si < 6; si++) {
+        for (int it = 0, moved = 1; moved && it < 40; it++) {
+            moved = 0;
+            for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) for (int dz = -1; dz <= 1; dz++) {
+                if (!dx && !dy && !dz) continue;
+                double cx = bx + dx * st[si], cy = by + dy * st[si], sx = bs + dz * sst[si];
+                if (sx < 0.8 || sx > 1.25) continue;
+                float c = bg_cost(xs, ys, ls, n, cx, cy, sx);
+                if (c < bc - 1e-4f) { bc = c; bx = cx; by = cy; bs = sx; moved = 1; }
+            }
+        }
+    }
+    bg_binmean(xs, ys, ls, n, bx, by, bs, bmean);
+    static int nl; if (nl++ < 24) logf_("fundo 2D: aneis centro %.2f,%.2f achatamento %.3f desvio %.2f (%d%% dos pontos)", bx, by, bs, bc, n * 100 / n0);
+    if (bc > 3.0f || bx < 200 || bx > 440 || by < 120 || by > 420) return 0;   // não é de anéis (ou o centro fugiu da tela)
+    // perfil: mediana de cada cor por faixa de raio (0,5 pixel), com todos os pixels das laterais
+    static float *chan[3]; static int *bin, *start, *cntb; static float *tmp;
+    if (!bin) { bin = malloc(640 * 480 * 4); start = malloc((BG_NB + 1) * 4); cntb = malloc(BG_NB * 4); tmp = malloc(640 * 480 * 4); for (int c = 0; c < 3; c++) chan[c] = malloc(640 * 480 * 4); }
+    if (!bin || !start || !cntb || !tmp || !chan[0] || !chan[1] || !chan[2]) return 0;
+    memset(cntb, 0, BG_NB * 4);
+    for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+        int i = y * w + x; bin[i] = -1;
+        if (!((x < 110 || x >= 530) && !ex[y][x])) continue;
+        double dx = (x + 0.5 - bx) * bs, dy = y + 0.5 - by, rr = sqrt(dx * dx + dy * dy); int b = (int)(rr / BG_BIN);
+        if (b >= BG_NB) continue;
+        if (bg_dev(bmean, (float)rr, (float)bg_lum(px[i])) > 12.0f) continue;   // fora dos anéis (painel, ícones)
+        bin[i] = b; cntb[b]++;
+    }
+    start[0] = 0; for (int b = 0; b < BG_NB; b++) start[b + 1] = start[b] + cntb[b];
+    { static int fillp[BG_NB]; memcpy(fillp, start, BG_NB * 4);
+      for (int i = 0; i < w * h; i++) if (bin[i] >= 0) { DWORD v = px[i]; int o = fillp[bin[i]]++; chan[0][o] = (float)(v & 255); chan[1][o] = (float)(v >> 8 & 255); chan[2][o] = (float)(v >> 16 & 255); } }
+    int last = -1;
+    for (int b = 0; b < BG_NB; b++) {
+        if (cntb[b] < 3) { m->prof[b][0] = -1; continue; }
+        for (int c = 0; c < 3; c++) { memcpy(tmp, chan[c] + start[b], cntb[b] * 4); m->prof[b][c] = bg_med(tmp, cntb[b]); }
+        if (cntb[b] >= 6) last = b;
+    }
+    if (last < 100) return 0;
+    for (int b = 0; b <= last; b++) if (m->prof[b][0] < 0) {        // buracos: interpola dos vizinhos
+        int a = b - 1, z = b + 1;
+        while (a >= 0 && m->prof[a][0] < 0) a--;
+        while (z <= last && m->prof[z][0] < 0) z++;
+        for (int c = 0; c < 3; c++) m->prof[b][c] = a < 0 ? m->prof[z][c] : z > last ? m->prof[a][c] : m->prof[a][c] + (m->prof[z][c] - m->prof[a][c]) * (b - a) / (float)(z - a);
+    }
+    m->nb = last + 1; m->rmax = last * BG_BIN; m->cx = bx; m->cy = by; m->sx = bs;
+    // período dos anéis (para continuar além do último raio medido)
+    int a0 = last - (int)(200 / BG_BIN); if (a0 < 0) a0 = 0;
+    double best = -1; int bl = 0; static float corr[402];
+    memset(corr, 0, sizeof corr);
+    for (int lag = (int)(20 / BG_BIN); lag <= (int)(200 / BG_BIN) && lag < last - a0; lag++) {
+        double sxy = 0, sxx = 0, syy = 0, mx = 0, my = 0; int k = 0;
+        for (int b = a0; b + lag <= last; b++) { mx += m->prof[b][1]; my += m->prof[b + lag][1]; k++; }
+        if (k < 20) break;
+        mx /= k; my /= k;
+        for (int b = a0; b + lag <= last; b++) { double u = m->prof[b][1] - mx, v = m->prof[b + lag][1] - my; sxy += u * v; sxx += u * u; syy += v * v; }
+        double r = sxy / sqrt(sxx * syy + 1e-9);
+        corr[lag] = (float)r;
+        if (r > best) { best = r; bl = lag; }
+    }
+    {   // o melhor pode ser meio período (os anéis claro e escuro se parecem): confere perto do dobro
+        int lo = bl * 2 - bl / 10, hi = bl * 2 + bl / 10, b2 = -1;
+        for (int lag = lo; lag <= hi && lag <= (int)(200 / BG_BIN) && lag < last - a0; lag++) if (b2 < 0 || corr[lag] > corr[b2]) b2 = lag;
+        if (b2 > 0 && corr[b2] >= best - 0.06) bl = b2;
+    }
+    m->P = best > 0.8 ? bl * BG_BIN : 0;
+    if (nl < 24) logf_("fundo 2D: perfil ate o raio %.1f, periodo %.1f (correlacao %.3f)", m->rmax, m->P, best);
+    if (m->P < 60) return 0;                          // sem repetição clara (anéis largos): não é o fundo de anéis
+    m->kind = 2;
+    return 1;
+}
+// laterais (e faixas de cima/baixo) de uma imagem W x H cuja parte 4:3 (640x480) fica em (vx,vy) com vw x vh
+static void bg_render_to(const BGMODEL *m, DWORD *dst, int W, int H, int vx, int vy, int vw, int vh) {
+    float kx = 640.0f / vw, ky = 480.0f / vh, fsx = (float)m->sx, fcx = (float)m->cx, fcy = (float)m->cy;
+    const float (*prof)[3] = m->hp ? (const float (*)[3])m->hp : (const float (*)[3])m->prof;
+    float bin = m->hp ? (float)m->hbin : (float)BG_BIN; int nb2 = (m->hp ? m->hnb : m->nb) - 2;
+    float rmax = (float)m->rmax, P = (float)m->P, inv = 1.0f / bin;
+    if (m->hp && (nb2 + 1) * bin < rmax) rmax = (nb2 + 1) * bin;
+    for (int Y = 0; Y < H; Y++) {
+        int inside_y = Y >= vy && Y < vy + vh;
+        float dy = (Y + 0.5f - vy) * ky - fcy, dy2 = dy * dy;
+        DWORD *row = dst + (size_t)Y * W;
+        for (int X = 0; X < W; X++) {
+            if (inside_y && X >= vx && X < vx + vw) { X = vx + vw - 1; continue; }
+            if (m->kind == 1) { row[X] = m->solid[X < vx ? 0 : X >= vx + vw ? 1 : Y < vy ? 2 : 3]; continue; }
+            float dx = ((X + 0.5f - vx) * kx - fcx) * fsx, r = sqrtf(dx * dx + dy2);
+            if (r > rmax) r -= P * ceilf((r - rmax) / P);
+            float f = r * inv; int i = (int)f; if (i < 0) i = 0; if (i > nb2) i = nb2;
+            float t = f - i; if (t < 0) t = 0; if (t > 1) t = 1;
+            const float *a = prof[i], *b = prof[i + 1];
+            int c0 = (int)(a[0] + (b[0] - a[0]) * t + 0.5f), c1 = (int)(a[1] + (b[1] - a[1]) * t + 0.5f), c2 = (int)(a[2] + (b[2] - a[2]) * t + 0.5f);
+            if (c0 > 255) c0 = 255; if (c1 > 255) c1 = 255; if (c2 > 255) c2 = 255;
+            if (c0 < 0) c0 = 0; if (c1 < 0) c1 = 0; if (c2 < 0) c2 = 0;
+            row[X] = (DWORD)c0 | (DWORD)c1 << 8 | (DWORD)c2 << 16;
+        }
+    }
+}
+static void bg_render(const BGMODEL *m) { bg_render_to(m, g_fbits, g_winw, g_winh, g_vx, g_vy, g_vw, g_vh); GdiFlush(); }
+// atualiza o modelo do fundo quando as bordas da tela mudam; 1 = laterais prontas em g_fdc
+static int bg_update(void) {
+    DWORD sig[48];
+    for (int y = 0; y < FSH; y++) { sig[y] = g_sbits[y * FSW] & 0xfcfcfc; sig[24 + y] = g_sbits[y * FSW + FSW - 1] & 0xfcfcfc; }
+    int cur = -1;
+    for (int i = 0; i < g_bgm_n; i++) if (!memcmp(g_bgm[i].sig, sig, sizeof sig)) { cur = i; break; }
+    if (cur < 0) {
+        if (!g_gdc || g_gbw != g_gw || g_gbh != g_gh) {
+            if (g_gdc) { SelectObject(g_gdc, g_gold); DeleteObject(g_gbmp); DeleteDC(g_gdc); g_gdc = NULL; }
+            HDC scr = GetDC(NULL); g_gdc = CreateCompatibleDC(scr); g_gbmp = dib32(scr, g_gw, g_gh, &g_gbits); ReleaseDC(NULL, scr);
+            if (!g_gbmp) { DeleteDC(g_gdc); g_gdc = NULL; return 0; }
+            g_gold = SelectObject(g_gdc, g_gbmp); g_gbw = g_gw; g_gbh = g_gh;
+        }
+        SetStretchBltMode(g_gdc, COLORONCOLOR);
+        StretchBlt(g_gdc, 0, 0, g_gw, g_gh, g_vdc, 0, 0, g_vdw, g_vdh, SRCCOPY);
+        GdiFlush();
+        int slot = g_bgm_n < 6 ? g_bgm_n++ : (g_bgm_cur + 1) % 6;
+        if (slot == g_bgm_drawn) g_bgm_drawn = -1;
+        BGMODEL *m = &g_bgm[slot];
+        m->kind = 0;
+        DWORD t0 = GetTickCount();
+        if (!bg_fit(g_gbits, g_gw, g_gh, m, 0)) m->kind = 0;
+        memcpy(m->sig, sig, sizeof sig);
+        static int nl; if (nl++ < 16) logf_("fundo 2D: %s (%u ms)", m->kind == 2 ? "aneis, laterais continuam o desenho" : m->kind == 1 ? "cor lisa nas bordas" : "outro, laterais desfocadas", GetTickCount() - t0);
+        cur = slot;
+    }
+    g_bgm_cur = cur;
+    if (!g_bgm[cur].kind) return 0;
+    if (g_bgm_drawn != cur || g_bgm_dw != g_winw || g_bgm_dh != g_winh) { bg_render(&g_bgm[cur]); g_bgm_drawn = cur; g_bgm_dw = g_winw; g_bgm_dh = g_winh; }
+    return 1;
+}
 static int fill_update(void) {
     if (!g_vdc || g_winw <= 0 || g_winh <= 0) return 0;
     if (!g_fdc || g_fw != g_winw || g_fh != g_winh) {
@@ -1831,6 +2088,10 @@ static int fill_update(void) {
     SetStretchBltMode(g_sdc, HALFTONE); SetBrushOrgEx(g_sdc, 0, 0, NULL);
     StretchBlt(g_sdc, 0, 0, FSW, FSH, g_vdc, 0, 0, g_vdw, g_vdh, SRCCOPY);
     GdiFlush();
+    if (cfg.menu_fill == 3) {
+        if (bg_update()) { g_fvalid = 1; memset(g_fsmall, 0, sizeof g_fsmall); return 1; }
+        g_bgm_drawn = -1;                             // fundo sem modelo: desfoque
+    }
     if (g_fvalid && !memcmp(g_fsmall, g_sbits, sizeof g_fsmall)) return 1;
     memcpy(g_fsmall, g_sbits, sizeof g_fsmall);
     // desfoque (3 passadas de caixa 3x3) em ponto flutuante
@@ -1878,6 +2139,340 @@ static int fill_update(void) {
     g_fvalid = 1;
     return 1;
 }
+// ---- fundos 2D prontos em 16:9 (menu_fill=3). Cada bitmap 640x480 que o jogo carrega (LoadImageA) é medido na
+// hora, limpo, sem nada do menu por cima. Na primeira vez que aparece vira uma imagem do tamanho da janela: o meio é
+// o próprio bitmap ampliado e as laterais continuam os anéis. Daí em diante, quando o jogo desenha o fundo, a tela
+// inteira sai pronta de uma vez (sem medir nada nem esperar). O que não for um desses fundos usa o caminho acima.
+// Pacote HD opcional (pasta hd ao lado do mod, gerado por tools/hd_menu): hd\<nome>.bmp é a imagem 4x e
+// hd\1x\<nome>.bmp substitui a original em 1x (é assim que a tela inicial fica com o azul escuro).
+typedef struct { DWORD hash; int kind; BGMODEL *m; DWORD *spx; HDC sdc; HBITMAP sbm; HGDIOBJ sold; char hd[MAX_PATH];
+                 HDC wdc; HBITMAP wbmp; HGDIOBJ wold; DWORD *wbits; int ww, wh, wvx, wvy, wvw, wvh; DWORD used, wver; } BGIMG;
+#define BGI_MAX 16
+static BGIMG g_bgi[BGI_MAX]; static int g_bgi_n;
+static struct { HBITMAP h; int e; } g_bgh[64]; static int g_bgh_n;   // bitmaps do jogo -> fundo
+static int g_bg_live = -1;                            // fundo inteiro na tela agora (-1: outro desenho)
+static void bg_wfree_idx(int i);
+static void bg_live(int e, const char *why) {
+    if (e == g_bg_live) return;
+    int old = g_bg_live; g_bg_live = e;
+    if (old >= 0 && g_bgi[old].kind == 1) bg_wfree_idx(old);   // aberturas: aparecem uma vez só
+    static int nl; if (nl++ < 40) logf_("fundo 2D na tela: %d -> %d (%s)", old, e, why);
+}
+static HDC dib_dc(int w, int h, DWORD **bits, HBITMAP *bm, HGDIOBJ *old) {
+    HDC scr = GetDC(NULL); HDC d = CreateCompatibleDC(scr); *bm = dib32(scr, w, h, bits); ReleaseDC(NULL, scr);
+    if (!d || !*bm) { if (*bm) DeleteObject(*bm); if (d) DeleteDC(d); *bm = NULL; return NULL; }
+    *old = SelectObject(d, *bm); return d;
+}
+static int bmp_pixels(HBITMAP hb, int w, int h, DWORD *dst) {   // bitmap (fora de qualquer DC) -> 32 bits, de cima p/ baixo
+    BITMAPINFO bi; memset(&bi, 0, sizeof bi);
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = w; bi.bmiHeader.biHeight = -h;
+    bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
+    HDC scr = GetDC(NULL); int r = GetDIBits(scr, hb, 0, h, dst, &bi, DIB_RGB_COLORS); ReleaseDC(NULL, scr);
+    return r == h;
+}
+static void bg_map(HBITMAP hb, int e) {
+    for (int i = 0; i < g_bgh_n; i++) if (g_bgh[i].h == hb) { g_bgh[i].e = e; return; }
+    if (g_bgh_n < 64) { g_bgh[g_bgh_n].h = hb; g_bgh[g_bgh_n].e = e; g_bgh_n++; }
+}
+static int bg_entry_px(const DWORD *px, const char *hd) {   // fundo com estes pixels (cria e mede na 1ª vez)
+    DWORD h = 2166136261u; for (int i = 0; i < 640 * 480; i++) h = (h ^ (px[i] & 0xffffff)) * 16777619u;
+    for (int i = 0; i < g_bgi_n; i++) if (g_bgi[i].hash == h) { if (hd && !g_bgi[i].hd[0]) snprintf(g_bgi[i].hd, MAX_PATH, "%s", hd); return i; }
+    if (g_bgi_n >= BGI_MAX) return -1;
+    BGIMG *b = &g_bgi[g_bgi_n]; memset(b, 0, sizeof *b); b->hash = h;
+    b->sdc = dib_dc(640, 480, &b->spx, &b->sbm, &b->sold);
+    if (!b->sdc) return -1;
+    memcpy(b->spx, px, 640 * 480 * 4); GdiFlush();
+    if (hd) snprintf(b->hd, MAX_PATH, "%s", hd);
+    b->m = (BGMODEL *)calloc(1, sizeof(BGMODEL));
+    DWORD t0 = GetTickCount();
+    if (b->m && bg_fit(px, 640, 480, b->m, 1)) b->kind = b->m->kind;
+    int e = g_bgi_n++;
+    logf_("fundo 2D %d: %s%s (%u ms)", e, b->kind == 2 ? "aneis" : b->kind == 1 ? "cor lisa" : "outro (laterais desfocadas)", b->hd[0] ? ", com imagem HD" : "", GetTickCount() - t0);
+    return e;
+}
+static HDC g_pdc; static HBITMAP g_pbmp; static HGDIOBJ g_pold; static DWORD *g_pbits;
+static int bg_entry_for(HDC s) {                       // fundo do bitmap selecionado em s (-1: não é 640x480)
+    HBITMAP hb = (HBITMAP)GetCurrentObject(s, OBJ_BITMAP);
+    if (!hb) return -1;
+    for (int i = 0; i < g_bgh_n; i++) if (g_bgh[i].h == hb) return g_bgh[i].e;
+    BITMAP bm; if (!GetObjectA(hb, sizeof bm, &bm) || bm.bmWidth != 640 || bm.bmHeight != 480) return -1;
+    if (!g_pdc && !(g_pdc = dib_dc(640, 480, &g_pbits, &g_pbmp, &g_pold))) return -1;
+    BitBlt(g_pdc, 0, 0, 640, 480, s, 0, 0, SRCCOPY); GdiFlush();
+    int e = bg_entry_px(g_pbits, NULL);
+    bg_map(hb, e);
+    return e;
+}
+static void bg_forget(HDC d) {                         // o jogo desenhou num bitmap: medir de novo se for fundo
+    if (!g_bgh_n || !d) return;
+    HBITMAP hb = (HBITMAP)GetCurrentObject(d, OBJ_BITMAP);
+    for (int i = 0; i < g_bgh_n; i++) if (g_bgh[i].h == hb) { g_bgh[i] = g_bgh[--g_bgh_n]; return; }
+}
+static int bg_wready(int e) {
+    BGIMG *b = &g_bgi[e];
+    return b->wdc && b->ww == g_winw && b->wh == g_winh && b->wvx == g_vx && b->wvy == g_vy && b->wvw == g_vw && b->wvh == g_vh;
+}
+static void bg_wfree(BGIMG *b) { if (b->wdc) { SelectObject(b->wdc, b->wold); DeleteObject(b->wbmp); DeleteDC(b->wdc); b->wdc = NULL; b->wbits = NULL; } }
+static void bg_wfree_idx(int i) { bg_wfree(&g_bgi[i]); }
+static void bg_release(void) { for (int i = 0; i < g_bgi_n; i++) bg_wfree(&g_bgi[i]); bg_live(-1, "OpenGL"); }
+static int bg_walive(int except) { int n = 0; for (int i = 0; i < g_bgi_n; i++) if (i != except && g_bgi[i].wdc && g_bgi[i].kind == 2) n++; return n; }
+// perfil dos anéis medido na própria imagem HD (mesmo centro e achatamento do 1x, faixas 4x mais finas): as
+// laterais ficam com as bordas tão nítidas quanto o meio, sem emenda
+static void bg_hdprof(BGMODEL *m, HBITMAP hb) {
+    DIBSECTION ds; if (!GetObjectA(hb, sizeof ds, &ds) || !ds.dsBm.bmBits || (ds.dsBm.bmBitsPixel != 24 && ds.dsBm.bmBitsPixel != 32)) return;
+    int W = ds.dsBm.bmWidth, H = ds.dsBm.bmHeight, bpp = ds.dsBm.bmBitsPixel / 8, stride = ds.dsBm.bmWidthBytes, up = ds.dsBmih.biHeight > 0;
+    double f = W / 640.0; if (f < 1.5 || fabs(H / 480.0 - f) > 0.01) return;
+    double bin = BG_BIN / f; int nb = (int)(m->rmax / bin) + 2;
+    double *acc = (double *)calloc((size_t)nb * 4, sizeof(double)); if (!acc) return;
+    const BYTE *bits = (const BYTE *)ds.dsBm.bmBits; int x0 = (int)(110 * f), x1 = (int)(530 * f);
+    for (int y = 0; y < H; y++) {
+        const BYTE *row = bits + (size_t)(up ? H - 1 - y : y) * stride;
+        double dy = (y + 0.5) / f - m->cy, dy2 = dy * dy;
+        for (int x = 0; x < W; x++) {
+            if (x == x0) { x = x1 - 1; continue; }
+            double dx = ((x + 0.5) / f - m->cx) * m->sx, r = sqrt(dx * dx + dy2); int b = (int)(r / bin);
+            if (b >= nb) continue;
+            const BYTE *p = row + x * bpp; float l = (float)((p[0] * 29 + p[1] * 150 + p[2] * 77) >> 8);
+            // fora dos anéis (painel, ícones): compara com o perfil 1x perto deste raio
+            float lo = 1e9f, hi = -1e9f;
+            for (int k = -1; k <= 1; k++) {
+                int i = (int)((r + k * 0.75) / BG_BIN); if (i < 0) i = 0; if (i > m->nb - 1) i = m->nb - 1;
+                float ml = (m->prof[i][0] * 29 + m->prof[i][1] * 150 + m->prof[i][2] * 77) / 256.0f;
+                if (ml < lo) lo = ml; if (ml > hi) hi = ml;
+            }
+            if (l < lo - 12 || l > hi + 12) continue;
+            double *a = acc + (size_t)b * 4; a[0] += p[0]; a[1] += p[1]; a[2] += p[2]; a[3] += 1;
+        }
+    }
+    float (*hp)[3] = (float (*)[3])malloc((size_t)nb * sizeof *hp); int last = -1, first = -1;
+    if (!hp) { free(acc); return; }
+    for (int b = 0; b < nb; b++) {
+        double *a = acc + (size_t)b * 4;
+        if (a[3] >= 2) { for (int c = 0; c < 3; c++) hp[b][c] = (float)(a[c] / a[3]); last = b; if (first < 0) first = b; }
+        else hp[b][0] = -1;
+    }
+    free(acc);
+    if (last < 0) { free(hp); return; }
+    for (int b = 0; b <= last; b++) if (hp[b][0] < 0) {           // buracos e o começo (sem amostras): do 1x / vizinhos
+        int a = b - 1, z = b + 1;
+        while (a >= 0 && hp[a][0] < 0) a--;
+        while (z <= last && hp[z][0] < 0) z++;
+        if (a < 0) { int i = (int)(b * bin / BG_BIN); if (i > m->nb - 1) i = m->nb - 1; for (int c = 0; c < 3; c++) hp[b][c] = m->prof[i][c]; continue; }
+        for (int c = 0; c < 3; c++) hp[b][c] = z > last ? hp[a][c] : hp[a][c] + (hp[z][c] - hp[a][c]) * (b - a) / (float)(z - a);
+    }
+    m->hp = hp; m->hnb = last + 1; m->hbin = bin;
+    logf_("fundo 2D: perfil dos aneis medido na imagem HD (%d faixas de %.3f)", m->hnb, bin);
+}
+static int bg_wbuild(int e) {                          // imagem do tamanho da janela com o fundo e as laterais
+    BGIMG *b = &g_bgi[e];
+    if (!b->kind || g_winw <= 0 || g_winh <= 0 || g_vw <= 0 || g_vh <= 0) return 0;
+    if (bg_wready(e)) { b->used = GetTickCount(); return 1; }
+    while (b->kind == 2 && bg_walive(e) >= 3) {       // no máximo 3 de anéis prontas (cada uma tem o tamanho da janela)
+        int lru = -1;
+        for (int i = 0; i < g_bgi_n; i++) if (i != e && i != g_bg_live && g_bgi[i].wdc && g_bgi[i].kind == 2 && (lru < 0 || g_bgi[i].used - g_bgi[lru].used > 0x80000000u)) lru = i;
+        if (lru < 0) break;
+        bg_wfree(&g_bgi[lru]);
+    }
+    if (b->wdc && (b->ww != g_winw || b->wh != g_winh)) bg_wfree(b);
+    if (!b->wdc) {
+        if (!(b->wdc = dib_dc(g_winw, g_winh, &b->wbits, &b->wbmp, &b->wold))) return 0;
+        b->ww = g_winw; b->wh = g_winh;
+    }
+    DWORD t0 = GetTickCount(); int hd = 0;
+    SetStretchBltMode(b->wdc, HALFTONE); SetBrushOrgEx(b->wdc, 0, 0, NULL);
+    if (b->hd[0]) {                                   // imagem HD do pacote: lida só agora (é grande)
+        HBITMAP hb = (HBITMAP)LoadImageA(NULL, b->hd, IMAGE_BITMAP, 0, 0, LR_LOADFROMFILE | LR_CREATEDIBSECTION);
+        BITMAP bm;
+        if (hb && GetObjectA(hb, sizeof bm, &bm) && bm.bmWidth >= 640 && bm.bmHeight >= 480) {
+            if (b->kind == 2 && !b->m->hp) bg_hdprof(b->m, hb);
+            HDC t = CreateCompatibleDC(NULL); HGDIOBJ o = SelectObject(t, hb);
+            StretchBlt(b->wdc, g_vx, g_vy, g_vw, g_vh, t, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+            SelectObject(t, o); DeleteDC(t); hd = 1;
+        }
+        if (hb) DeleteObject(hb);
+    }
+    if (!hd) StretchBlt(b->wdc, g_vx, g_vy, g_vw, g_vh, b->sdc, 0, 0, 640, 480, SRCCOPY);
+    GdiFlush();
+    bg_render_to(b->m, b->wbits, g_winw, g_winh, g_vx, g_vy, g_vw, g_vh);
+    GdiFlush();
+    b->wvx = g_vx; b->wvy = g_vy; b->wvw = g_vw; b->wvh = g_vh; b->used = GetTickCount(); b->wver++;
+    static int nl; if (nl++ < 24) logf_("fundo 2D %d: tela %dx%d pronta%s (%u ms)", e, g_winw, g_winh, hd ? " (HD)" : "", GetTickCount() - t0);
+    return 1;
+}
+// BitBlt do jogo vindo de um bitmap: se for um fundo conhecido, copia da imagem pronta (1 = desenhado)
+static int bg_blit(HDC v, int x, int y, int w, int h, HDC s, int sx, int sy, DWORD rop) {
+    if (cfg.menu_fill != 3 || g_gl_on) return 0;
+    int full = x <= 0 && y <= 0 && x + w >= g_gw && y + h >= g_gh;
+    if (!s || rop != SRCCOPY || x != sx || y != sy || g_gw != 640 || g_gh != 480) { if (full) bg_live(-1, s ? "copia de outra imagem" : "tela pintada"); return 0; }
+    int e = bg_entry_for(s);
+    if (e < 0 || !g_bgi[e].kind) {
+        if (full) {
+            // nas trocas de menu o jogo copia a tela inteira de um DC com um ícone pequeno selecionado: só o canto
+            // muda e o resto da tela continua igual, então o fundo das laterais também continua
+            BITMAP bm; HGDIOBJ hb = GetCurrentObject(s, OBJ_BITMAP); char why[64];
+            if (hb && GetObjectA(hb, sizeof bm, &bm)) {
+                if (bm.bmWidth < g_gw || bm.bmHeight < g_gh) return 0;
+                snprintf(why, sizeof why, "imagem %dx%d %d bits", (int)bm.bmWidth, (int)bm.bmHeight, (int)bm.bmBitsPixel);
+            } else snprintf(why, sizeof why, "imagem desconhecida");
+            bg_live(-1, why);
+        }
+        return 0;
+    }
+    if (full) bg_live(e, "fundo");
+    if (g_vdw != g_vw || g_vdh != g_vh || !bg_wbuild(e)) return 0;
+    BGIMG *b = &g_bgi[e];
+    r_BitBlt(v, KX(x), KX(y), KX(x + w) - KX(x), KX(y + h) - KX(y), b->wdc, b->wvx + KX(x), b->wvy + KX(y), SRCCOPY);
+    return 1;
+}
+static void bg_fullcover(int x, int y, int w, int h, const char *why) { if (x <= 0 && y <= 0 && x + w >= g_gw && y + h >= g_gh) bg_live(-1, why); }
+
+// ---- ícones e outras imagens dos menus com o pacote HD: o ícone ampliado do pacote é misturado ao fundo pronto
+// (os ícones do jogo trazem um pedaço do fundo desenhado junto; onde o ícone é só fundo, vale a imagem pronta,
+// para não aparecer o retângulo do ícone)
+typedef struct { HBITMAP h; int w, hh, own1x; DWORD *base; HDC bdc; HBITMAP bbm; HGDIOBJ bold;
+                 HDC hdc; HBITMAP hbm; HGDIOBJ hold; int hdw, hdh;
+                 HDC cdc; HBITMAP cbm; HGDIOBJ cold; DWORD *cbits; int cw, ch, cox, coy, cbg; double ck; DWORD cver; } MIMG;
+#define MIMG_MAX 160
+static MIMG g_mi[MIMG_MAX]; static int g_min;
+static void mimg_free(MIMG *m) {
+    if (m->cdc) { SelectObject(m->cdc, m->cold); DeleteObject(m->cbm); DeleteDC(m->cdc); }
+    if (m->hdc) { SelectObject(m->hdc, m->hold); DeleteObject(m->hbm); DeleteDC(m->hdc); }
+    if (m->bdc) { SelectObject(m->bdc, m->bold); DeleteObject(m->bbm); DeleteDC(m->bdc); }
+    memset(m, 0, sizeof *m);
+}
+static MIMG *mimg_find(HBITMAP h) { for (int i = 0; i < g_min; i++) if (g_mi[i].h == h) return &g_mi[i]; return NULL; }
+static int g_hd_n, g_hd_1x;
+static void mimg_add(HBITMAP r, const char *name) {
+    BITMAP bm; if (!GetObjectA(r, sizeof bm, &bm) || bm.bmWidth <= 0 || bm.bmHeight <= 0 || bm.bmWidth > 4096 || bm.bmHeight > 4096) return;
+    int w = bm.bmWidth, h = bm.bmHeight, isbg = w == 640 && h == 480;
+    const char *bn = name; for (const char *q = name; *q; q++) if (*q == '\\' || *q == '/') bn = q + 1;
+    char p1[MAX_PATH], p4[MAX_PATH];
+    snprintf(p1, sizeof p1, "%s\\hd\\1x\\%s", g_dir, bn); snprintf(p4, sizeof p4, "%s\\hd\\%s", g_dir, bn);
+    int has1 = cfg.menu_hd && GetFileAttributesA(p1) != INVALID_FILE_ATTRIBUTES, has4 = cfg.menu_hd && GetFileAttributesA(p4) != INVALID_FILE_ATTRIBUTES;
+    if (!isbg && !has1 && !has4) return;
+    if (isbg && cfg.menu_fill != 3 && !has1 && !has4) return;
+    DWORD *px = (DWORD *)malloc((size_t)w * h * 4); if (!px) return;
+    int own1x = 0;
+    if (has1) {                                       // versão 1x do pacote no lugar da original
+        HBITMAP o1 = (HBITMAP)LoadImageA(NULL, p1, IMAGE_BITMAP, 0, 0, LR_LOADFROMFILE | LR_CREATEDIBSECTION);
+        BITMAP b1; if (o1 && GetObjectA(o1, sizeof b1, &b1) && b1.bmWidth == w && b1.bmHeight == h && bmp_pixels(o1, w, h, px)) own1x = 1;
+        if (o1) DeleteObject(o1);
+    }
+    if (!own1x && !bmp_pixels(r, w, h, px)) { free(px); return; }
+    if (isbg) {
+        if (cfg.menu_fill == 3) {
+            int e = bg_entry_px(px, has4 ? p4 : NULL);
+            if (e >= 0) {
+                bg_map(r, e);
+                if (g_bgi[e].kind == 2 && g_vdc && !g_gl_on && g_vdw == g_vw && g_vdh == g_vh) bg_wbuild(e);
+            }
+            static int nl; if (nl++ < 32) logf_("imagem %s -> fundo %d%s", bn, e, own1x ? " (versao 1x do pacote)" : "");
+        }
+        free(px); return;
+    }
+    if (g_min >= MIMG_MAX) { free(px); return; }
+    MIMG *m = &g_mi[g_min]; memset(m, 0, sizeof *m);
+    m->h = r; m->w = w; m->hh = h; m->own1x = own1x; m->cbg = -2;
+    if (!(m->bdc = dib_dc(w, h, &m->base, &m->bbm, &m->bold))) { free(px); return; }
+    memcpy(m->base, px, (size_t)w * h * 4); free(px); GdiFlush();
+    if (has4) {
+        HBITMAP hb = (HBITMAP)LoadImageA(NULL, p4, IMAGE_BITMAP, 0, 0, LR_LOADFROMFILE | LR_CREATEDIBSECTION);
+        BITMAP b4;
+        if (hb && GetObjectA(hb, sizeof b4, &b4) && b4.bmWidth >= w * 2 && b4.bmWidth % w == 0 && b4.bmHeight == b4.bmWidth / w * h) {
+            m->hdc = CreateCompatibleDC(NULL); m->hbm = hb; m->hold = SelectObject(m->hdc, hb); m->hdw = b4.bmWidth; m->hdh = b4.bmHeight;
+        } else if (hb) DeleteObject(hb);
+    }
+    g_min++; if (m->hdc) g_hd_n++; if (own1x) g_hd_1x++;
+    static int nl; if (nl++ < 8) logf_("imagem %s %dx%d: %s%s", bn, w, h, m->hdc ? "HD do pacote" : "sem HD", own1x ? ", versao 1x do pacote" : "");
+}
+// desenha a imagem m com origem (ox, oy) em pixels do jogo na memória cdc, na escala da tela virtual
+static int mimg_render(MIMG *m, int ox, int oy) {
+    int e = (cfg.menu_fill == 3 && !g_gl_on && g_bg_live >= 0 && bg_wready(g_bg_live) && g_vdw == g_vw && g_vdh == g_vh) ? g_bg_live : -1;
+    DWORD ver = e >= 0 ? g_bgi[e].wver : 0;
+    int cw = KX(ox + m->w) - KX(ox), ch = KX(oy + m->hh) - KX(oy);
+    if (cw <= 0 || ch <= 0) return 0;
+    if (m->cdc && m->cox == ox && m->coy == oy && m->ck == g_k && m->cbg == e && m->cver == ver && m->cw == cw && m->ch == ch) return 1;
+    if (m->cdc && (m->cw != cw || m->ch != ch)) { SelectObject(m->cdc, m->cold); DeleteObject(m->cbm); DeleteDC(m->cdc); m->cdc = NULL; }
+    if (!m->cdc && !(m->cdc = dib_dc(cw, ch, &m->cbits, &m->cbm, &m->cold))) return 0;
+    SetStretchBltMode(m->cdc, HALFTONE); SetBrushOrgEx(m->cdc, 0, 0, NULL);
+    if (m->hdc) StretchBlt(m->cdc, 0, 0, cw, ch, m->hdc, 0, 0, m->hdw, m->hdh, SRCCOPY);
+    else StretchBlt(m->cdc, 0, 0, cw, ch, m->bdc, 0, 0, m->w, m->hh, SRCCOPY);
+    GdiFlush();
+    if (e >= 0) {
+        BGIMG *b = &g_bgi[e]; int w = m->w, h = m->hh;
+        float *al = (float *)malloc((size_t)w * h * sizeof(float) * 2);
+        if (al) {
+            float *tmp = al + (size_t)w * h;
+            for (int j = 0; j < h; j++) for (int i = 0; i < w; i++) {
+                int gx = ox + i, gy = oy + j; float a = 1;
+                if (gx >= 0 && gy >= 0 && gx < 640 && gy < 480) {
+                    DWORD p = m->base[j * w + i], q = b->spx[gy * 640 + gx]; int d = 0;
+                    for (int c = 0; c < 24; c += 8) { int t = abs((int)(p >> c & 255) - (int)(q >> c & 255)); if (t > d) d = t; }
+                    a = (d - 3) / 7.0f; a = a < 0 ? 0 : a > 1 ? 1 : a;
+                }
+                al[j * w + i] = a;
+            }
+            for (int j = 0; j < h; j++) for (int i = 0; i < w; i++) {     // alarga 1 pixel (borda do desenho)
+                float mx = 0;
+                for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
+                    int ii = i + dx, jj = j + dy; if (ii < 0 || jj < 0 || ii >= w || jj >= h) continue;
+                    if (al[jj * w + ii] > mx) mx = al[jj * w + ii];
+                }
+                tmp[j * w + i] = mx;
+            }
+            for (int j = 0; j < h; j++) for (int i = 0; i < w; i++) {     // e suaviza
+                float sum = 0; int n = 0;
+                for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
+                    int ii = i + dx, jj = j + dy; if (ii < 0 || jj < 0 || ii >= w || jj >= h) continue;
+                    sum += tmp[jj * w + ii]; n++;
+                }
+                al[j * w + i] = sum / n;
+            }
+            int bx0 = b->wvx + KX(ox), by0 = b->wvy + KX(oy);
+            for (int Y = 0; Y < ch; Y++) {
+                int wy = by0 + Y; if (wy < 0 || wy >= b->wh) continue;
+                float v = (Y + 0.5f) * h / ch - 0.5f; int j0 = (int)floorf(v); float fy = v - j0; int j1 = j0 + 1;
+                if (j0 < 0) j0 = 0; if (j1 >= h) j1 = h - 1; if (j0 >= h) j0 = h - 1;
+                DWORD *row = m->cbits + (size_t)Y * cw, *wr = b->wbits + (size_t)wy * b->ww;
+                for (int X = 0; X < cw; X++) {
+                    int wx = bx0 + X; if (wx < 0 || wx >= b->ww) continue;
+                    float u = (X + 0.5f) * w / cw - 0.5f; int i0 = (int)floorf(u); float fx = u - i0; int i1 = i0 + 1;
+                    if (i0 < 0) i0 = 0; if (i1 >= w) i1 = w - 1; if (i0 >= w) i0 = w - 1;
+                    float a = (al[j0 * w + i0] * (1 - fx) + al[j0 * w + i1] * fx) * (1 - fy) + (al[j1 * w + i0] * (1 - fx) + al[j1 * w + i1] * fx) * fy;
+                    if (a >= 0.999f) continue;
+                    DWORD p = row[X], q = wr[wx], o = 0;
+                    for (int c = 0; c < 24; c += 8) o |= (DWORD)((int)((q >> c & 255) * (1 - a) + (p >> c & 255) * a + 0.5f)) << c;
+                    row[X] = o;
+                }
+            }
+            free(al); GdiFlush();
+        }
+    }
+    m->cox = ox; m->coy = oy; m->ck = g_k; m->cbg = e; m->cver = ver; m->cw = cw; m->ch = ch;
+    return 1;
+}
+static int mimg_blit(HDC v, int x, int y, int w, int h, HDC s, int sx, int sy, DWORD rop) {
+    if (!g_min || !s || rop != SRCCOPY || g_gl_on) return 0;
+    MIMG *m = mimg_find((HBITMAP)GetCurrentObject(s, OBJ_BITMAP));
+    if (!m || (!m->hdc && !m->own1x)) return 0;
+    if (sx < 0 || sy < 0 || w <= 0 || h <= 0 || sx + w > m->w || sy + h > m->hh) return 0;
+    int ox = x - sx, oy = y - sy;
+    if (!mimg_render(m, ox, oy)) return 0;
+    r_BitBlt(v, KX(x), KX(y), KX(x + w) - KX(x), KX(y + h) - KX(y), m->cdc, KX(x) - KX(ox), KX(y) - KX(oy), SRCCOPY);
+    return 1;
+}
+typedef HANDLE (WINAPI *PFN_LI)(HINSTANCE, LPCSTR, UINT, int, int, UINT);
+typedef BOOL (WINAPI *PFN_DO)(HGDIOBJ);
+static PFN_LI r_LoadImageA; static PFN_DO r_DeleteObject;
+static HANDLE WINAPI h_LoadImageA(HINSTANCE hi, LPCSTR name, UINT type, int cx, int cy, UINT fl) {
+    HANDLE r = r_LoadImageA(hi, name, type, cx, cy, fl);
+    if (r && type == IMAGE_BITMAP && cfg.enabled && (ULONG_PTR)name > 0xffff) mimg_add((HBITMAP)r, name);
+    return r;
+}
+static BOOL WINAPI h_DeleteObject(HGDIOBJ o) {
+    for (int i = 0; i < g_bgh_n; i++) if (g_bgh[i].h == (HBITMAP)o) { g_bgh[i] = g_bgh[--g_bgh_n]; break; }
+    for (int i = 0; i < g_min; i++) if (g_mi[i].h == (HBITMAP)o) { mimg_free(&g_mi[i]); g_mi[i] = g_mi[--g_min]; memset(&g_mi[g_min], 0, sizeof g_mi[g_min]); break; }
+    return r_DeleteObject(o);
+}
 static void present_2d(int force) {
     if (!g_vdc || !g_hwnd || g_gl_on) return;
     DWORD now = GetTickCount();
@@ -1888,9 +2483,12 @@ static void present_2d(int force) {
     if (g_vdw == g_vw && g_vdh == g_vh) BitBlt(dc, g_vx, g_vy, g_vw, g_vh, g_vdc, 0, 0, SRCCOPY);
     else { SetStretchBltMode(dc, HALFTONE); SetBrushOrgEx(dc, 0, 0, NULL); StretchBlt(dc, g_vx, g_vy, g_vw, g_vh, g_vdc, 0, 0, g_vdw, g_vdh, SRCCOPY); }
     if (g_vx > 0 || g_vy > 0) {
-        if (cfg.menu_fill == 1 && fill_update()) {
-            if (g_vx > 0) { BitBlt(dc, 0, 0, g_vx, g_winh, g_fdc, 0, 0, SRCCOPY); BitBlt(dc, g_vx + g_vw, 0, g_winw - g_vx - g_vw, g_winh, g_fdc, g_vx + g_vw, 0, SRCCOPY); }
-            if (g_vy > 0) { BitBlt(dc, 0, 0, g_winw, g_vy, g_fdc, 0, 0, SRCCOPY); BitBlt(dc, 0, g_vy + g_vh, g_winw, g_winh - g_vy - g_vh, g_fdc, 0, g_vy + g_vh, SRCCOPY); }
+        HDC fd = NULL;
+        if (cfg.menu_fill == 3 && g_bg_live >= 0 && bg_wready(g_bg_live)) { fd = g_bgi[g_bg_live].wdc; g_fill_pending = 0; }   // fundo pronto
+        else if ((cfg.menu_fill == 1 || cfg.menu_fill == 3) && fill_update()) fd = g_fdc;
+        if (fd) {
+            if (g_vx > 0) { BitBlt(dc, 0, 0, g_vx, g_winh, fd, 0, 0, SRCCOPY); BitBlt(dc, g_vx + g_vw, 0, g_winw - g_vx - g_vw, g_winh, fd, g_vx + g_vw, 0, SRCCOPY); }
+            if (g_vy > 0) { BitBlt(dc, 0, 0, g_winw, g_vy, fd, 0, 0, SRCCOPY); BitBlt(dc, 0, g_vy + g_vh, g_winw, g_winh - g_vy - g_vh, fd, 0, g_vy + g_vh, SRCCOPY); }
         } else {
             HBRUSH k = (HBRUSH)GetStockObject(BLACK_BRUSH);
             if (g_vx > 0) { RECT l = { 0, 0, g_vx, g_winh }, rr = { g_vx + g_vw, 0, g_winw, g_winh }; FillRect(dc, &l, k); FillRect(dc, &rr, k); }
@@ -1912,12 +2510,15 @@ static BOOL WINAPI h_BitBlt(HDC d, int x, int y, int w, int h, HDC s, int sx, in
     int dg = gdi_redirect(d), sg = s && gdi_redirect(s);
     if (dg) {
         HDC v = vdc(); BOOL r; int cl = vclip_begin(d, v);
-        if (sg) r = r_BitBlt(v, KX(x), KX(y), KX(x + w) - KX(x), KX(y + h) - KX(y), v, KX(sx), KX(sy), rop);
+        if (sg) { r = r_BitBlt(v, KX(x), KX(y), KX(x + w) - KX(x), KX(y + h) - KX(y), v, KX(sx), KX(sy), rop); bg_fullcover(x, y, w, h, "copia da propria tela"); }
+        else if (bg_blit(v, x, y, w, h, s, sx, sy, rop)) r = TRUE;
+        else if (mimg_blit(v, x, y, w, h, s, sx, sy, rop)) r = TRUE;
         else if (g_k == 1.0 || !s) r = r_BitBlt(v, KX(x), KX(y), KX(x + w) - KX(x), KX(y + h) - KX(y), s, sx, sy, rop);
         else { stretch_mode(v, rop); r = StretchBlt(v, KX(x), KX(y), KX(x + w) - KX(x), KX(y + h) - KX(y), s, sx, sy, w, h, rop); }
         vclip_end(v, cl);
         touched(); return r;
     }
+    bg_forget(d);
     if (sg) {   // o jogo lendo da tela: reduz da tela virtual
         HDC v = vdc();
         if (g_k == 1.0) return r_BitBlt(d, x, y, w, h, v, sx, sy, rop);
@@ -1928,7 +2529,7 @@ static BOOL WINAPI h_BitBlt(HDC d, int x, int y, int w, int h, HDC s, int sx, in
 }
 static int WINAPI h_StretchDIBits(HDC d, int x, int y, int w, int h, int sx, int sy, int sw, int sh, const VOID *bits, const BITMAPINFO *bi, UINT u, DWORD rop) {
     if (gdi_redirect(d)) {
-        HDC v = vdc(); stretch_mode(v, rop); int cl = vclip_begin(d, v);
+        HDC v = vdc(); stretch_mode(v, rop); int cl = vclip_begin(d, v); bg_fullcover(x, y, w, h, "StretchDIBits");
         int r = r_StretchDIBits(v, KX(x), KX(y), KX(x + w) - KX(x), KX(y + h) - KX(y), sx, sy, sw, sh, bits, bi, u, rop);
         vclip_end(v, cl);
         touched(); return r;
@@ -1936,15 +2537,70 @@ static int WINAPI h_StretchDIBits(HDC d, int x, int y, int w, int h, int sx, int
     return r_StretchDIBits(d, x, y, w, h, sx, sy, sw, sh, bits, bi, u, rop);
 }
 static int WINAPI h_FillRect(HDC d, const RECT *rc, HBRUSH b) {
-    if (gdi_redirect(d) && rc) { HDC v = vdc(); int cl = vclip_begin(d, v); RECT r2 = { KX(rc->left), KX(rc->top), KX(rc->right), KX(rc->bottom) }; int r = r_FillRect(v, &r2, b); vclip_end(v, cl); touched(); return r; }
+    if (!gdi_redirect(d)) bg_forget(d);
+    if (gdi_redirect(d) && rc) { HDC v = vdc(); int cl = vclip_begin(d, v); bg_fullcover(rc->left, rc->top, rc->right - rc->left, rc->bottom - rc->top, "FillRect"); RECT r2 = { KX(rc->left), KX(rc->top), KX(rc->right), KX(rc->bottom) }; int r = r_FillRect(v, &r2, b); vclip_end(v, cl); touched(); return r; }
     return r_FillRect(d, rc, b);
 }
+// Nomes embaixo dos ícones dos menus: o jogo centraliza cada nome sob o ícone, na largura exata do texto. Em
+// português alguns ficam mais largos que o espaço ("Carregar Jogo" entra em "Configuração"); esses são
+// desenhados um pouco mais estreitos, centralizados no mesmo lugar (sempre dentro do retângulo original, que é
+// o que o jogo redesenha quando o mouse passa por cima).
+static double label_squeeze(HDC d, LPCSTR t, int n, const RECT *rc) {
+    BYTE *m = fe_menu();
+    if (!m || !t || !rc) return 1.0;
+    int len = n < 0 ? (int)strlen(t) : n;
+    struct { RECT r; } lab[64]; int nl = 0, me = -1;
+    for (int pn = 0; m && pn < 16 && !IsBadReadPtr(m, 0x20); pn++, m = *(BYTE **)(m + 0x18)) {
+        BYTE *it = *(BYTE **)(m + 8);
+        for (int k = 0; it && k < 96 && nl < 64 && !IsBadReadPtr(it, 0x118); k++, it = *(BYTE **)(it + 0x110)) {
+            if (*(int *)(it + 0x6c) != 4) continue;              // só itens de imagem com nome embaixo
+            const char *tx = (const char *)(it + 0x2c); int tl = 0;
+            while (tl < 64 && tx[tl]) tl++;
+            if (!tl || tl >= 64) continue;
+            SIZE sz; if (!GetTextExtentPoint32A(d, tx, tl, &sz) || sz.cx <= 0) continue;
+            int x = *(int *)(it + 0x70), y = *(int *)(it + 0x74), w = *(int *)(it + 0x78), h = *(int *)(it + 0x7c);
+            RECT r = { x + w / 2 - sz.cx / 2, y + h, x + w / 2 - sz.cx / 2 + sz.cx, y + h + sz.cy };
+            // enquanto o nome é desenhado o jogo soma a altura do texto à do item: o próprio usa o retângulo recebido
+            if (me < 0 && r.left == rc->left && r.right == rc->right && !strncmp(tx, t, len < tl ? len : tl)) { me = nl; r = *rc; }
+            lab[nl++].r = r;
+        }
+    }
+    if (me < 0) return 1.0;
+    const RECT *a = &lab[me].r; double fct = 1.0;
+    for (int i = 0; i < nl; i++) {
+        if (i == me) continue;
+        const RECT *b = &lab[i].r;
+        if (a->top >= b->bottom || b->top >= a->bottom || a->left >= b->right || b->left >= a->right) continue;   // não encostam
+        double ca = (a->left + a->right) / 2.0, cb = (b->left + b->right) / 2.0, half = ((a->right - a->left) + (b->right - b->left)) / 2.0;
+        double need = (fabs(cb - ca) - 6.0) / half;
+        if (need < fct) fct = need;
+    }
+    return fct < 0.7 ? 0.7 : fct;
+}
+static struct { HFONT src; double k, f; HFONT dst; } g_cf[16]; static int g_cfn;
+static HFONT condensed_font(HFONT f, double fct) {       // fonte já ampliada, só mais estreita
+    for (int i = 0; i < g_cfn; i++) if (g_cf[i].src == f && g_cf[i].k == g_k && g_cf[i].f == fct) return g_cf[i].dst;
+    LOGFONTA lf; if (!GetObjectA(f, sizeof lf, &lf)) return NULL;
+    HDC v = vdc(); HGDIOBJ o = r_SelectObject(v, f); TEXTMETRICA tm; GetTextMetricsA(v, &tm); r_SelectObject(v, o);
+    lf.lfWidth = (LONG)floor(tm.tmAveCharWidth * fct + 0.5); if (lf.lfWidth < 1) lf.lfWidth = 1;
+    HFONT nf = CreateFontIndirectA(&lf); if (!nf) return NULL;
+    int slot = g_cfn < 16 ? g_cfn++ : 0;
+    if (g_cfn == 16 && slot == 0 && g_cf[0].dst) DeleteObject(g_cf[0].dst);
+    g_cf[slot].src = f; g_cf[slot].k = g_k; g_cf[slot].f = fct; g_cf[slot].dst = nf;
+    return nf;
+}
 static int WINAPI h_DrawTextA(HDC d, LPCSTR t, int n, LPRECT rc, UINT f) {
+    if (!(f & DT_CALCRECT) && !gdi_redirect(d)) bg_forget(d);
     if (gdi_redirect(d) && rc && !(f & DT_CALCRECT)) {
         HDC v = vdc();
         RECT r2 = { KX(rc->left), KX(rc->top), KX(rc->right), KX(rc->bottom) };
         int cl = vclip_begin(d, v);
-        r_DrawTextA(v, t, n, &r2, f);
+        double sq = (f & (DT_CENTER | DT_RIGHT | DT_WORDBREAK)) ? 1.0 : label_squeeze(d, t, n, rc);
+        HFONT cf = sq < 0.999 ? condensed_font((HFONT)GetCurrentObject(v, OBJ_FONT), sq) : NULL;
+        if (cf) {
+            static int nl; if (nl++ < 8) logf_("menu: nome '%.24s' estreitado para %.0f%% (encostava no vizinho)", t, sq * 100);
+            HGDIOBJ o = r_SelectObject(v, cf); r_DrawTextA(v, t, n, &r2, f | DT_CENTER); r_SelectObject(v, o);
+        } else r_DrawTextA(v, t, n, &r2, f);
         vclip_end(v, cl);
         touched();
         RECT m = *rc; return r_DrawTextA(d, t, n, &m, f | DT_CALCRECT);   // altura em unidades do jogo
@@ -2932,6 +3588,9 @@ static void init(HMODULE self) {
     r_PeekMessageA = hook_iat(exe, "USER32.dll", "PeekMessageA", h_PeekMessageA);
     r_BitBlt = hook_iat(exe, "GDI32.dll", "BitBlt", h_BitBlt);
     r_StretchDIBits = hook_iat(exe, "GDI32.dll", "StretchDIBits", h_StretchDIBits);
+    r_LoadImageA = hook_iat(exe, "USER32.dll", "LoadImageA", h_LoadImageA);
+    r_DeleteObject = hook_iat(exe, "GDI32.dll", "DeleteObject", h_DeleteObject);
+    if (!r_DeleteObject) r_DeleteObject = DeleteObject;
     r_SelectObject = hook_iat(exe, "GDI32.dll", "SelectObject", h_SelectObject);
     r_SetBkColor = hook_iat(exe, "GDI32.dll", "SetBkColor", h_SetBkColor);
     r_SetTextColor = hook_iat(exe, "GDI32.dll", "SetTextColor", h_SetTextColor);
