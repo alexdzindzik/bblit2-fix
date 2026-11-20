@@ -1,5 +1,11 @@
 # Histórico de versões
 
+## 0.12.1
+- **Correção**: com o pacote HD dos menus instalado e `hd_textures=0`, o jogo fechava ao entrar na fase. O contador de imagens HD dos menus tinha o mesmo nome da lista de texturas HD e somava nela. A compilação agora avisa declarações repetidas (`-Wredundant-decls`).
+- **F12 tira uma captura** da imagem do jogo na resolução da janela, sem perdas, em `bin\capturas\` (BMP), já com antisserrilhado e efeitos. Só com o jogo em foco.
+- **Diagnóstico**: se o jogo fechar com erro, o log mostra o módulo, o deslocamento, os registradores e os endereços da pilha.
+- README: link para o teaser no YouTube.
+
 ## 0.12
 - **Menus em 16:9 de verdade**: as telas 2D (inicial, configuração, carregar e aberturas) ocupam a tela inteira sem esticar. Cada fundo do jogo é medido assim que o jogo carrega a imagem e vira uma tela 16:9 pronta (os anéis continuam até as bordas; nas aberturas, a cor lisa do fundo). Ao trocar de menu, a tela inteira aparece de uma vez, sem as laterais preenchendo depois (`menu_fill=3`, novo padrão).
 - **Pacote HD dos menus (opcional)**: `tools/hd_menu/make_pack.py` gera a pasta `bin\hd` com os ícones, logos e fundos dos menus ampliados 4× pelo Real-ESRGAN (anime 6B, via onnxruntime) a partir dos arquivos do jogo. A tela inicial pode ficar no azul escuro da tela de configuração (recolorindo também o fundo desenhado nos ícones dela). O mod mistura cada ícone ao fundo pronto e mede o perfil dos anéis na própria imagem HD (`menu_hd=1`).

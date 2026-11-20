@@ -133,6 +133,8 @@ Para desinstalar, apague `dinput.dll` (e, se quiser, `bblit2fix.ini` e `bblit2fi
 | `contrast` | `[postfx]` | 105 | Contraste, % |
 | `vignette` | `[postfx]` | 20 | Cantos levemente escurecidos (0–100) |
 
+**F12** salva uma captura da tela do jogo, na resolução do monitor e sem perdas, em `bin\capturas\`.
+
 Com `debug=1` (seção `[fix]`), algumas teclas ajudam a comparar: **F9** alterna entre as distâncias de objetos e LOD originais e as do mod, **F11** liga e desliga os efeitos de imagem e **F8** finge que o controle foi desconectado/conectado (para testar as dicas). `dump_textures=1` grava as texturas carregadas em `texdump.bin`, com a assinatura usada pela lista HD; uma lista extra pode ir em `bin\bblit2fix_hd.txt` (uma assinatura hexadecimal por linha).
 
 ## Limitações conhecidas

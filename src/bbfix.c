@@ -16,7 +16,7 @@
 #include <math.h>
 #include <GL/gl.h>
 
-#define FIX_VERSION "0.12"
+#define FIX_VERSION "0.12.1"
 
 // ---------------------------------------------------------------- config / log
 static struct {
@@ -764,8 +764,42 @@ static void fbo_rebind(void) {
     if (g_fbo_ok && wglGetCurrentContext() == g_fbo_rc) x_BindFramebuffer(GL_FRAMEBUFFER_EXT, g_fbo);
 }
 
-static BOOL WINAPI h_wglSwapBuffers(HDC dc) { fbo_present(); BOOL r = r_wglSwapBuffers(dc); fbo_rebind(); after_swap(); return r; }
-static BOOL WINAPI h_SwapBuffersGdi(HDC dc) { fbo_present(); BOOL r = r_SwapBuffersGdi(dc); fbo_rebind(); after_swap(); return r; }
+// F12: captura da tela do jogo na resolução da janela, sem perdas (bin\capturas\*.bmp). Lê a imagem final
+// (depois do antisserrilhado e dos efeitos), antes da troca de buffers.
+static void shot_check(void) {
+    static int prev;
+    int down = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
+    int fire = down && !prev; prev = down;
+    if (!fire || !g_gl_on || g_winw <= 0 || g_winh <= 0) return;
+    DWORD pid = 0; HWND fg = GetForegroundWindow();             // só com o jogo em foco (F12 em outro programa não conta)
+    if (fg) GetWindowThreadProcessId(fg, &pid);
+    if (pid != GetCurrentProcessId()) return;
+    int w = g_winw, h = g_winh, stride = (w * 3 + 3) & ~3;
+    BYTE *px = malloc((size_t)stride * h);
+    if (!px) return;
+    GLint rfb = 0, rb = 0, pa = 4;
+    if (x_BindFramebuffer) { glGetIntegerv(0x8CAA /* GL_READ_FRAMEBUFFER_BINDING */, &rfb); x_BindFramebuffer(GL_READ_FRAMEBUFFER_EXT, 0); }
+    glGetIntegerv(0x0C02 /* GL_READ_BUFFER */, &rb); glGetIntegerv(0x0D05 /* GL_PACK_ALIGNMENT */, &pa);
+    glReadBuffer(GL_BACK); glPixelStorei(0x0D05, 4);
+    glReadPixels(0, 0, w, h, 0x80E0 /* GL_BGR */, GL_UNSIGNED_BYTE, px);
+    glPixelStorei(0x0D05, pa); glReadBuffer((GLenum)rb);
+    if (x_BindFramebuffer) x_BindFramebuffer(GL_READ_FRAMEBUFFER_EXT, (GLuint)rfb);
+    char dir[MAX_PATH], path[MAX_PATH];
+    snprintf(dir, sizeof dir, "%s\\capturas", g_dir); CreateDirectoryA(dir, NULL);
+    SYSTEMTIME st; GetLocalTime(&st);
+    snprintf(path, sizeof path, "%s\\bblit2_%04d%02d%02d_%02d%02d%02d_%03d.bmp", dir, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        BITMAPFILEHEADER fh = { 0x4d42, 0, 0, 0, sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) };
+        BITMAPINFOHEADER ih = { sizeof ih, w, h, 1, 24, BI_RGB, (DWORD)stride * h, 2835, 2835, 0, 0 };
+        fh.bfSize = fh.bfOffBits + ih.biSizeImage;
+        fwrite(&fh, sizeof fh, 1, f); fwrite(&ih, sizeof ih, 1, f); fwrite(px, 1, (size_t)stride * h, f); fclose(f);
+        logf_("captura: %s (%dx%d)", path, w, h);
+    }
+    free(px);
+}
+static BOOL WINAPI h_wglSwapBuffers(HDC dc) { fbo_present(); shot_check(); BOOL r = r_wglSwapBuffers(dc); fbo_rebind(); after_swap(); return r; }
+static BOOL WINAPI h_SwapBuffersGdi(HDC dc) { fbo_present(); shot_check(); BOOL r = r_SwapBuffersGdi(dc); fbo_rebind(); after_swap(); return r; }
 
 // ----- MSAA: escolhe um formato multisample via WGL_ARB_pixel_format com um contexto temporário
 #define WGL_DRAW_TO_WINDOW_ARB 0x2001
@@ -2340,7 +2374,7 @@ static void mimg_free(MIMG *m) {
     memset(m, 0, sizeof *m);
 }
 static MIMG *mimg_find(HBITMAP h) { for (int i = 0; i < g_min; i++) if (g_mi[i].h == h) return &g_mi[i]; return NULL; }
-static int g_hd_n, g_hd_1x;
+static int g_mimg_hd_n, g_mimg_1x_n;            // contadores do pacote HD dos menus (nome próprio: g_hd_n é a lista de texturas HD)
 static void mimg_add(HBITMAP r, const char *name) {
     BITMAP bm; if (!GetObjectA(r, sizeof bm, &bm) || bm.bmWidth <= 0 || bm.bmHeight <= 0 || bm.bmWidth > 4096 || bm.bmHeight > 4096) return;
     int w = bm.bmWidth, h = bm.bmHeight, isbg = w == 640 && h == 480;
@@ -2381,7 +2415,7 @@ static void mimg_add(HBITMAP r, const char *name) {
             m->hdc = CreateCompatibleDC(NULL); m->hbm = hb; m->hold = SelectObject(m->hdc, hb); m->hdw = b4.bmWidth; m->hdh = b4.bmHeight;
         } else if (hb) DeleteObject(hb);
     }
-    g_min++; if (m->hdc) g_hd_n++; if (own1x) g_hd_1x++;
+    g_min++; if (m->hdc) g_mimg_hd_n++; if (own1x) g_mimg_1x_n++;
     static int nl; if (nl++ < 8) logf_("imagem %s %dx%d: %s%s", bn, w, h, m->hdc ? "HD do pacote" : "sem HD", own1x ? ", versao 1x do pacote" : "");
 }
 // desenha a imagem m com origem (ox, oy) em pixels do jogo na memória cdc, na escala da tela virtual
@@ -2979,6 +3013,27 @@ static LONG CALLBACK veh(EXCEPTION_POINTERS *e) {
         static int n; if (n++ < 10) logf_("EXCECAO %08lx em %p (eip %08lx) dados %08lx %08lx", code, e->ExceptionRecord->ExceptionAddress, e->ContextRecord->Eip,
             e->ExceptionRecord->NumberParameters > 0 ? (DWORD)e->ExceptionRecord->ExceptionInformation[0] : 0,
             e->ExceptionRecord->NumberParameters > 1 ? (DWORD)e->ExceptionRecord->ExceptionInformation[1] : 0);
+        if (n <= 3) {                                  // onde: módulo + deslocamento, registradores e endereços de retorno na pilha
+            CONTEXT *c = e->ContextRecord;
+            char mod[MAX_PATH] = "?"; HMODULE hm = NULL;
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)e->ExceptionRecord->ExceptionAddress, &hm))
+                GetModuleFileNameA(hm, mod, sizeof mod);
+            const char *b = strrchr(mod, '\\');
+            logf_("  modulo %s + %lx | eax %08lx ebx %08lx ecx %08lx edx %08lx esi %08lx edi %08lx ebp %08lx esp %08lx",
+                  b ? b + 1 : mod, (DWORD)((BYTE *)e->ExceptionRecord->ExceptionAddress - (BYTE *)hm),
+                  c->Eax, c->Ebx, c->Ecx, c->Edx, c->Esi, c->Edi, c->Ebp, c->Esp);
+            const DWORD *sp = (const DWORD *)c->Esp; int k = 0;
+            for (int i = 0; i < 256 && k < 8; i++) {
+                MEMORY_BASIC_INFORMATION mi;
+                if (!VirtualQuery(sp + i, &mi, sizeof mi) || mi.State != MEM_COMMIT) break;
+                HMODULE rm = NULL; DWORD v = sp[i];
+                if (v < 0x10000 || !GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)v, &rm)) continue;
+                char rn[MAX_PATH]; GetModuleFileNameA(rm, rn, sizeof rn);
+                const char *rb = strrchr(rn, '\\');
+                logf_("  pilha+%03x: %s + %lx", i * 4, rb ? rb + 1 : rn, v - (DWORD)rm);
+                k++;
+            }
+        }
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -3162,7 +3217,6 @@ static PFN_DI_CreateDevice r_DI_CreateDevice;
 static PFN_DID_GetDeviceState r_DID_GetDeviceState;
 static void *g_kbd;
 static const GUID k_GUID_SysKeyboard = { 0x6F1D2B61, 0xD5A0, 0x11CF, { 0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 } };
-static void poll_pad(void);
 
 static void patch_vtbl(void **vtbl, int idx, void *hook, void **orig) {
     if (vtbl[idx] == hook) return;
@@ -3500,7 +3554,6 @@ static void install_pad_prompts(void) {
 }
 
 // debug=1: F9 alterna entre as distâncias originais (100%) e as do mod; F11 liga/desliga os efeitos de imagem
-static int g_fx_bypass;
 static void debug_keys(void) {
     static int prev8;
     int d8 = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
