@@ -6,6 +6,12 @@ Correções e melhorias para a versão de PC de **Pernalonga e Taz: O Furacão d
 
 Inspirado no [BBLIT Remaster](https://github.com/InLineR495/BBLIT-Remaster) (para *Lost in Time*, do mesmo motor), mas é um projeto separado. O executável do *Furacão do Tempo* tem outra estrutura e nenhum endereço em comum com o do *Lost in Time*.
 
+## Vídeo
+
+[![Teaser do BBLIT2 Fix no YouTube](docs/teaser.jpg)](https://youtu.be/U_6izGr0n9c)
+
+Teaser de 55 segundos no YouTube: menus em 16:9, antes e depois com zoom nas bordas, nas letras e nos botões do controle, e o pacote HD dos menus.
+
 ## Antes e depois
 
 Capturas no próprio jogo, em 2560×1440 (v0.9 a v0.12).
