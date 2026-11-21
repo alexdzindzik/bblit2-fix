@@ -1862,9 +1862,9 @@ static int sh_wants(GLenum m) {
     sh_dbg[5]++;
     return 1;
 }
-static void sh_tick(void) {                     // resumo a cada 10 s no primeiro minuto da fase
+static void sh_tick(void) {                     // debug=1: resumo a cada 10 s no primeiro minuto da fase
     static DWORD t0; static int nl;
-    if (!cfg.hud_shadow || nl >= 6 || !sh_dbg[0]) return;
+    if (!cfg.hud_shadow || !cfg.debug || nl >= 6 || !sh_dbg[0]) return;
     DWORD now = GetTickCount(); if (!t0) t0 = now;
     if (now - t0 < 10000) return;
     t0 = now; nl++;
@@ -1966,7 +1966,7 @@ static void sh_batch(void) {
             ok = fabsf(q[i].x - (q[i0].x + ax * (q[i].s - s0))) < 1 && fabsf(q[i].y - (q[j0].y + ay * (q[i].t - t0))) < 1;
         if (!ok) {
             sh_dbg[7]++;
-            static int nl; if (nl++ < 4) logf_("sombra do HUD: textura %u nao e retangulo alinhado (%d vertices): %.1f,%.1f %.3f,%.3f | %.1f,%.1f %.3f,%.3f | %.1f,%.1f %.3f,%.3f",
+            static int nl; if (cfg.debug && nl++ < 4) logf_("sombra do HUD: textura %u nao e retangulo alinhado (%d vertices): %.1f,%.1f %.3f,%.3f | %.1f,%.1f %.3f,%.3f | %.1f,%.1f %.3f,%.3f",
                 sh_tex, k, q[0].x, q[0].y, q[0].s, q[0].t, q[1].x, q[1].y, q[1].s, q[1].t, q[2].x, q[2].y, q[2].s, q[2].t);
             continue;
         }
