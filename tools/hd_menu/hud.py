@@ -19,7 +19,10 @@ FORCE_ESRGAN = set()          # hashes de silhuetas que ficam melhores pelo ESRG
 
 # ---------------------------------------------------------------- BMP 32 bits (BGRA, de baixo para cima)
 def read_bmp32(path):
-    """-> [h, w, 4] uint8 RGBA, na ordem de uma imagem (linha 0 em cima)"""
+    """-> [h, w, 4] uint8 RGBA, na ordem de uma imagem (linha 0 em cima).
+
+    O mod grava a linha 0 da textura (a de baixo no OpenGL) como a primeira do arquivo, que no BMP de baixo
+    para cima é a de baixo: a imagem lida aqui já fica de cabeça para cima."""
     b = open(path, 'rb').read()
     if len(b) < 54 or b[:2] != b'BM':
         raise ValueError('não é BMP: %s' % path)
@@ -196,11 +199,9 @@ def upscale_gradient(rgba, scale=4):
 
 # ---------------------------------------------------------------- pacote
 def _sheet(pairs, scale=4):
-    """original (ampliado sem suavizar) ao lado do HD, um por linha, sobre xadrez; de cabeça para cima
-    (a linha 0 da textura do OpenGL é a de baixo)"""
+    """original (ampliado sem suavizar) ao lado do HD, um por linha, sobre xadrez"""
     rows = []
     for name, src, hd in pairs:
-        src, hd = src[::-1], hd[::-1]
         big = cv2.resize(src, (src.shape[1] * scale, src.shape[0] * scale), interpolation=cv2.INTER_NEAREST)
         row = np.concatenate([big, np.zeros((big.shape[0], 16, 4), np.uint8), hd], 1)
         rows.append(row)

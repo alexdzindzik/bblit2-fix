@@ -24,8 +24,8 @@
 
 // ---------------------------------------------------------------- config / log
 static struct {
-    int enabled, log_gl, aspect, msaa, vsync, xinput, unlock_joy, a_enter, deadzone, cam_stick, swap_ab, language, game_res, background, debug, inv_stick, inv_trig, draw_dist, ssaa, mipmaps, aniso, actor_dist, auto_quality, lod_dist, force_gl, dump_tex, hd_tex, pad_prompts, menu_fill, hires_menu, menu_pad, menu_hd, hud_probe, center_menus;
-} cfg = { 1, 1, 2, 4, 1, 1, 0, 1, 30, 1, 0, -1, 1, 1, 0, 1, 1, 400, 2, 1, 16, 200, 1, 400, 1, 0, 1, 2, 1, 1, 1, 1, 0, 1 };
+    int enabled, log_gl, aspect, msaa, vsync, xinput, unlock_joy, a_enter, deadzone, cam_stick, swap_ab, language, game_res, background, debug, inv_stick, inv_trig, draw_dist, ssaa, mipmaps, aniso, actor_dist, auto_quality, lod_dist, force_gl, dump_tex, hd_tex, pad_prompts, menu_fill, hires_menu, menu_pad, menu_hd, hud_probe, center_menus, hud_hd;
+} cfg = { 1, 1, 2, 4, 1, 1, 0, 1, 30, 1, 0, -1, 1, 1, 0, 1, 1, 400, 2, 1, 16, 200, 1, 400, 1, 0, 1, 2, 1, 1, 1, 1, 0, 1, 1 };
 // pós-processamento [postfx]: valores em %
 static struct { int on, bloom, threshold, sharpen, saturation, contrast, vignette; } fx = { 1, 25, 70, 40, 110, 105, 20 };
 
@@ -87,6 +87,7 @@ static void load_config(void) {
     cfg.hd_tex    = ini_int("video", "hd_textures", 1);
     cfg.menu_fill = ini_int("video", "menu_fill", 3);
     cfg.menu_hd = ini_int("video", "menu_hd", 1);
+    cfg.hud_hd = ini_int("video", "hud_hd", 1);
     cfg.hires_menu = ini_int("video", "hires_menu", 1);
     cfg.pad_prompts = ini_int("pad", "button_prompts", 2);
     fx.on         = ini_int("postfx", "enabled", 1);
@@ -1476,6 +1477,70 @@ static void upload_rgba(GLenum t, GLint ifmt, int W, int H, const DWORD *p) {
     glPixelStorei(GL_UNPACK_ALIGNMENT_, al); glPixelStorei(GL_UNPACK_ROW_LENGTH_, rl);
     glPixelStorei(GL_UNPACK_SKIP_ROWS_, sr); glPixelStorei(GL_UNPACK_SKIP_PIXELS_, sp);
 }
+// pacote HD do HUD (tools\hd_menu\make_pack.py): o mod exporta as texturas do HUD para bin\hd\hud\fonte e
+// carrega bin\hd\hud\<hash>.bmp (4x) no lugar do xBR. Só quando a pasta bin\hd existe.
+static int g_hud_dir;                           // bin\hd existe (visto ao ligar)
+enum { HP_EXPORTED = 1, HP_LOADED = 2, HP_BADLOG = 4, HP_BRIGHTLOG = 8 };
+static struct { unsigned long long h; unsigned char f; } g_hudp[96]; static int g_hudp_n, g_hudp_loaded;
+static unsigned char *hudp_flags(unsigned long long h) {
+    static unsigned char spare;
+    for (int i = 0; i < g_hudp_n; i++) if (g_hudp[i].h == h) return &g_hudp[i].f;
+    if (g_hudp_n == (int)(sizeof g_hudp / sizeof *g_hudp)) { spare = HP_EXPORTED | HP_BADLOG | HP_BRIGHTLOG; return &spare; }
+    g_hudp[g_hudp_n].h = h; g_hudp[g_hudp_n].f = 0;
+    return &g_hudp[g_hudp_n++].f;
+}
+static unsigned char *file_read(const char *path, size_t *n) {
+    FILE *f = fopen(path, "rb"); if (!f) return NULL;
+    unsigned char *b = NULL; long sz = -1;
+    if (fseek(f, 0, SEEK_END) == 0) sz = ftell(f);
+    if (sz > 0 && sz <= 64 << 20 && fseek(f, 0, SEEK_SET) == 0 && (b = malloc((size_t)sz)) && fread(b, 1, (size_t)sz, f) != (size_t)sz) { free(b); b = NULL; }
+    fclose(f);
+    if (b) *n = (size_t)sz;
+    return b;
+}
+static void hud_export(unsigned long long hs, int w, int h, const DWORD *rgba, unsigned char *fl) {
+    if (*fl & HP_EXPORTED) return;
+    *fl |= HP_EXPORTED;
+    char d[MAX_PATH], p[MAX_PATH];
+    snprintf(d, sizeof d, "%s\\hd\\hud", g_dir); CreateDirectoryA(d, NULL);
+    snprintf(d, sizeof d, "%s\\hd\\hud\\fonte", g_dir); CreateDirectoryA(d, NULL);
+    snprintf(p, sizeof p, "%s\\%016llx.bmp", d, hs);
+    if (GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES) return;
+    size_t n = bmp32_build((const uint32_t *)rgba, w, h, NULL);
+    unsigned char *b = malloc(n); if (!b) return;
+    bmp32_build((const uint32_t *)rgba, w, h, b);
+    FILE *f = fopen(p, "wb"); int ok = f && fwrite(b, 1, n, f) == n; if (f) fclose(f);
+    free(b);
+    if (!ok) { DeleteFileA(p); logf_("HUD: nao consegui gravar %s", p); return; }
+    snprintf(p, sizeof p, "%s\\%016llx.txt", d, hs);
+    if ((f = fopen(p, "w"))) { fprintf(f, "%016llx\n", rgba_hash((const uint32_t *)rgba, (size_t)w * h)); fclose(f); }
+    logf_("HUD: textura %016llx %dx%d exportada para hd\\hud\\fonte", hs, w, h);
+}
+// devolve a versão 4x do pacote (malloc) ou NULL (sem arquivo, inválido ou tamanho errado: fica o xBR)
+static DWORD *hud_pack_load(unsigned long long hs, int w, int h, const DWORD *rgba, unsigned char *fl) {
+    char p[MAX_PATH]; snprintf(p, sizeof p, "%s\\hd\\hud\\%016llx.bmp", g_dir, hs);
+    size_t n = 0; unsigned char *b = file_read(p, &n);
+    if (!b) return NULL;
+    int W = 0, H = 0; DWORD *px = NULL;
+    if (bmp32_parse(b, n, &W, &H, NULL) && W == w * 4 && H == h * 4 && (px = malloc((size_t)W * H * 4)))
+        bmp32_parse(b, n, &W, &H, (uint32_t *)px);
+    else if (!(*fl & HP_BADLOG)) {
+        *fl |= HP_BADLOG;
+        logf_("HUD: %s invalido ou fora do tamanho (%dx%d, esperado %dx%d, BMP 32 bits): fica o xBR", p, W, H, w * 4, h * 4);
+    }
+    free(b);
+    if (!px) return NULL;
+    if (!(*fl & HP_BRIGHTLOG)) {                // o pacote foi gerado com estas mesmas cores?
+        *fl |= HP_BRIGHTLOG;
+        snprintf(p, sizeof p, "%s\\hd\\hud\\fonte\\%016llx.txt", g_dir, hs);
+        FILE *f = fopen(p, "r"); unsigned long long want = 0;
+        if (f) { if (fscanf(f, "%llx", &want) != 1) want = 0; fclose(f); }
+        if (want && want != rgba_hash((const uint32_t *)rgba, (size_t)w * h))
+            logf_("HUD: pacote do HUD gerado com outro Brilho (textura %016llx); rode o make_pack.py de novo", hs);
+    }
+    if (!(*fl & HP_LOADED)) { *fl |= HP_LOADED; logf_("HUD HD: %016llx do pacote (%d texturas)", hs, ++g_hudp_loaded); }
+    return px;
+}
 // envia a versão HD (xBR) ou o ícone do controle no lugar da textura, se ela estiver na lista; 1 = enviou
 static int hd_replace(GLenum t, GLint ifmt, int w, int h, const DWORD *rgba, unsigned long long hs, GLuint name) {
     int ic = (cfg.xinput && cfg.pad_prompts == 2) ? icon_index(hs) : -1;
@@ -1503,6 +1568,18 @@ static int hd_replace(GLenum t, GLint ifmt, int w, int h, const DWORD *rgba, uns
         static int nlog; if (nlog++ < 12) logf_("icone do controle: %s na textura %u", k_icon_tex[ic].btn < 0 ? "Enter" : k_btn_name[k_icon_tex[ic].btn], name);
         return 1;
     }
+    if (cfg.hud_hd && g_hud_dir && hud_kind(hs) != HUD_NONE) {
+        unsigned char *fl = hudp_flags(hs);
+        hud_export(hs, w, h, rgba, fl);
+        DWORD *hd = hud_pack_load(hs, w, h, rgba, fl);
+        if (hd) {                                   // mesmo caminho do xBR: borda espalhada, envio 4x, marca HD
+            tex_dilate(hd, W, H);
+            upload_rgba(t, ifmt, W, H, hd);
+            free(hd);
+            hd_mark(name, 1);
+            return 1;
+        }
+    }
     if (!hd_has(hs)) return 0;
     DWORD *big = malloc((size_t)W * H * 4);
     if (!big) return 0;
@@ -1516,7 +1593,7 @@ static int hd_replace(GLenum t, GLint ifmt, int w, int h, const DWORD *rgba, uns
 // glTexImage2D nível 0: decide se vai a versão HD. O nome da textura sempre perde a marca HD antes (nomes são
 // reaproveitados pelo jogo e entre contextos: uma marca velha estragaria texturas atualizadas por pedaços).
 static unsigned long long g_dbg_hash; static int g_dbg_name;
-static int tex_hooks_on(void) { return g_hd_n || cfg.dump_tex || cfg.hud_probe || (cfg.xinput && cfg.pad_prompts == 2); }
+static int tex_hooks_on(void) { return g_hd_n || cfg.dump_tex || cfg.hud_probe || (cfg.hud_hd && g_hud_dir) || (cfg.xinput && cfg.pad_prompts == 2); }
 // tipo de HUD de cada textura do jogo (HUD_NONE/SPRITE/BAR_FILL/3D), por nome, marcado no envio
 static unsigned char g_hud_kind_by_name[8192];
 static unsigned long long g_tex_hash[8192]; static unsigned short g_tex_w[8192], g_tex_h[8192];   // hash e tamanho por nome (diagnóstico)
@@ -4175,6 +4252,9 @@ static void init(HMODULE self) {
     install_draw_distance();
     install_object_hooks();
     hd_load_list();
+    {   char d[MAX_PATH]; snprintf(d, sizeof d, "%s\\hd", g_dir); DWORD at = GetFileAttributesA(d);
+        g_hud_dir = at != INVALID_FILE_ATTRIBUTES && (at & FILE_ATTRIBUTE_DIRECTORY);
+        if (cfg.hud_hd && g_hud_dir) logf_("HUD HD: pasta hd encontrada (texturas do HUD exportadas para hd\\hud\\fonte)"); }
     install_pal_hook();
     install_pad_prompts();
     install_text_hook();

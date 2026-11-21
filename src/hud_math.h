@@ -7,4 +7,13 @@ enum { HUD_NONE = 0, HUD_SPRITE = 1, HUD_BAR_FILL = 2, HUD_3D = 3 };
 // tipo de uma textura do HUD pelo hash de desenho (tex_lhash)
 int hud_kind(unsigned long long h);
 
+#include <stddef.h>
+#include <stdint.h>
+
+// BMP 32 bits (BGRA, de baixo para cima). Pixels em RGBA como o OpenGL recebe (byte 0 = R), linha 0 = a de
+// baixo da textura = primeira linha do arquivo. parse: out NULL só lê o tamanho; devolve 1 se válido.
+int bmp32_parse(const unsigned char *buf, size_t n, int *w, int *h, uint32_t *out);
+size_t bmp32_build(const uint32_t *rgba, int w, int h, unsigned char *out);   // bytes; out NULL = só o tamanho
+unsigned long long rgba_hash(const uint32_t *p, size_t n);                    // FNV-1a 64 do RGBA exato
+
 #endif
