@@ -25,9 +25,9 @@ static void test_icon_chars_hit_their_glyph(void) {
     }
 }
 
-// Quadro em que o jogo desenha cada glifo (pixels numa tela 2560x1440, medidos com o F10 e nas capturas):
-// letra 16x16 -> 56x90, ícone do PS1 32x32 -> ~76x90, "START" 64x16 -> 176x90. O miolo das letras maiúsculas
-// ocupa 40 px de altura, centrado a 60 px do topo do quadro.
+// Quadro em que o jogo desenha cada glifo (pixels numa tela 2560x1440, medidos com o F10 e nos anéis das capturas):
+// letra 16x16 -> 56x90, ícone do PS1 32x32 -> ~73x98, Enter/Esc 32x16 -> 101x90, "START" 64x16 -> 176x90. Todos
+// começam no topo das letras; o miolo das maiúsculas ocupa 40 px de altura, centrado a 60 px do topo.
 #define LETTER_H 40.0f
 #define LETTER_MID 60.0f
 static void check_round_button(int btn, int w, int h, float qw, float qh) {
@@ -39,14 +39,19 @@ static void check_round_button(int btn, int w, int h, float qw, float qh) {
     CHECK(g.cy - ry >= 0 && g.cy + ry <= h);
     float dw = 2 * g.rad * pc, dh = 2 * ry * pr;         // tamanho na tela
     CHECK(dw / dh > 0.96f && dw / dh < 1.04f);           // redondo na tela
-    CHECK(dw > 1.3f * LETTER_H && dw < 1.7f * LETTER_H); // um pouco maior que as letras, como o Ⓐ do Enter
+    CHECK(dw > 58 && dw < 62);                           // todos do mesmo tamanho (60 px, 1,5x a altura das letras)
     float mid = g.cy * pr;
     CHECK(mid > LETTER_MID - 6 && mid < LETTER_MID + 6); // centrado na altura das letras
-    if (!(dw / dh > 0.96f && dw / dh < 1.04f) || !(mid > LETTER_MID - 6 && mid < LETTER_MID + 6) || !(dw > 1.3f * LETTER_H && dw < 1.7f * LETTER_H))
+    if (!(dw / dh > 0.96f && dw / dh < 1.04f) || !(mid > LETTER_MID - 6 && mid < LETTER_MID + 6) || !(dw > 58 && dw < 62))
         printf("  botao %d: %.0fx%.0f px, centro a %.0f px do topo\n", btn, dw, dh, mid);
 }
 static void test_face_buttons_round_and_letter_sized(void) {
-    for (int b = BTN_A; b <= BTN_Y; b++) check_round_button(b, 32, 32, 76, 90);
+    for (int b = BTN_A; b <= BTN_Y; b++) check_round_button(b, 32, 32, 72.8f, 98);
+}
+static void test_enter_and_menu_match_the_face_buttons(void) {
+    check_round_button(BTN_A, 32, 16, 101, 90);          // tecla Enter -> Ⓐ (ou Ⓑ com swap_ab)
+    check_round_button(BTN_B, 32, 16, 101, 90);
+    check_round_button(BTN_START, 32, 16, 101, 90);      // tecla Esc -> Menu
 }
 static void test_back_is_a_round_button(void) {
     check_round_button(BTN_BACK, 64, 16, 176, 90);
@@ -66,6 +71,7 @@ static void test_b_goes_back_while_f4_prompt_on_screen(void) {
 int main(void) {
     test_icon_chars_hit_their_glyph();
     test_face_buttons_round_and_letter_sized();
+    test_enter_and_menu_match_the_face_buttons();
     test_back_is_a_round_button();
     test_back_advance_matches_icon();
     test_b_goes_back_while_f4_prompt_on_screen();

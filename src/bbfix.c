@@ -18,13 +18,14 @@
 #include "hud_math.h"
 #include "pad_cursor.h"
 #include "pad_icons.h"
+#include "menu_center.h"
 
 #define FIX_VERSION "0.12.1"
 
 // ---------------------------------------------------------------- config / log
 static struct {
-    int enabled, log_gl, aspect, msaa, vsync, xinput, unlock_joy, a_enter, deadzone, cam_stick, swap_ab, language, game_res, background, debug, inv_stick, inv_trig, draw_dist, ssaa, mipmaps, aniso, actor_dist, auto_quality, lod_dist, force_gl, dump_tex, hd_tex, pad_prompts, menu_fill, hires_menu, menu_pad, menu_hd, hud_probe;
-} cfg = { 1, 1, 2, 4, 1, 1, 0, 1, 30, 1, 0, -1, 1, 1, 0, 1, 1, 400, 2, 1, 16, 200, 1, 400, 1, 0, 1, 2, 1, 1, 1, 1, 0 };
+    int enabled, log_gl, aspect, msaa, vsync, xinput, unlock_joy, a_enter, deadzone, cam_stick, swap_ab, language, game_res, background, debug, inv_stick, inv_trig, draw_dist, ssaa, mipmaps, aniso, actor_dist, auto_quality, lod_dist, force_gl, dump_tex, hd_tex, pad_prompts, menu_fill, hires_menu, menu_pad, menu_hd, hud_probe, center_menus;
+} cfg = { 1, 1, 2, 4, 1, 1, 0, 1, 30, 1, 0, -1, 1, 1, 0, 1, 1, 400, 2, 1, 16, 200, 1, 400, 1, 0, 1, 2, 1, 1, 1, 1, 0, 1 };
 // pós-processamento [postfx]: valores em %
 static struct { int on, bloom, threshold, sharpen, saturation, contrast, vignette; } fx = { 1, 25, 70, 40, 110, 105, 20 };
 
@@ -65,6 +66,7 @@ static void load_config(void) {
     cfg.background = ini_int("video", "background", 1);
     cfg.debug     = ini_int("fix", "debug", 0);
     cfg.hud_probe = ini_int("debug", "hud_probe", 0);
+    cfg.center_menus = ini_int("game", "center_menus", 1);
     cfg.inv_stick = ini_int("pad", "invert_camera_stick", 1);
     cfg.inv_trig  = ini_int("pad", "invert_camera_triggers", 1);
     cfg.draw_dist = ini_int("video", "draw_distance", 400);
@@ -342,9 +344,11 @@ static void debug_keys(void);
 static void icons_sync(void);
 static void hd_reset(void);
 static HGLRC g_hd_rc;                               // contexto dono das texturas marcadas como HD
+static void mc_frame_end(void);
 static void after_swap(void) {
     g_frames++;
     pr_tick();
+    mc_frame_end();
     if (scaling_active() && r_Clear && r_Scissor && (g_vx > 0 || g_vy > 0)) {
         // limpa as barras para o próximo quadro (o jogo pode não limpar a cor)
         int S = g_S;
@@ -1267,6 +1271,12 @@ static void icon_render(int btn, int w, int h, DWORD *out) {
             float t = rad * 0.085f;
             canvas_rect(cv, CW, CH, cx - rad * 0.42f, cy - rad * 0.38f, cx + rad * 0.16f, cy + rad * 0.10f, t, -1);
             canvas_rect(cv, CW, CH, cx - rad * 0.16f, cy - rad * 0.10f, cx + rad * 0.42f, cy + rad * 0.38f, t, 0.16f);
+        } else if (btn == BTN_START) {                                 // ≡
+            for (int k = -1; k <= 1; k++) {
+                float yy = cy + k * rad * 0.27f, hh = rad * 0.075f, ww = rad * 0.42f;
+                for (int y = (int)(yy - hh); y <= (int)(yy + hh); y++) for (int x = (int)(cx - ww); x <= (int)(cx + ww); x++)
+                    if (x >= 0 && y >= 0 && x < CW && y < CH) px_over(&cv[(size_t)y * CW + x], 0.95f, 0.95f, 0.95f, 1);
+            }
         } else {
             const char *t = btn == BTN_A ? "A" : btn == BTN_B ? "B" : btn == BTN_X ? "X" : "Y";
             float lh = rad * 0.95f;
@@ -3834,19 +3844,74 @@ static void __cdecl txt_log(const DWORD *sp) {
     logf_("texto: a1 %08lx a3 %08lx a4 %08lx | %s| %s", sp[1], sp[3], sp[4], as, hx);
     nl++;
 }
+// ---- menus "nome ... valor" centrados (Configuração > Som etc.): os x dos textos do jogo são trocados na memória,
+// antes de a função de texto lê-los, pelo original + o deslocamento medido no quadro anterior (menu_center.c)
+static struct { BYTE *p; short orig, written; } g_mc_x[96]; static int g_mc_xn;   // x original de cada trecho visto
+static struct { BYTE *p; MC_RUN r; } g_mc_cur[64]; static int g_mc_curn;           // trechos do quadro atual
+static BYTE *g_mc_used[64]; static int g_mc_usedn, g_mc_shift;                     // decisão do quadro anterior
+static int mc_orig(BYTE *p) {                         // x original guardado (ou o atual, se o texto é novo/mudou)
+    short cur = (short)(p[0] << 8 | p[1]);
+    for (int i = 0; i < g_mc_xn; i++) if (g_mc_x[i].p == p) {
+        if (cur != g_mc_x[i].written) { g_mc_x[i].orig = cur; g_mc_x[i].written = cur; }
+        return i;
+    }
+    int i = g_mc_xn < 96 ? g_mc_xn++ : (int)(GetTickCount() % 96);
+    g_mc_x[i].p = p; g_mc_x[i].orig = cur; g_mc_x[i].written = cur;
+    return i;
+}
+static void mc_text(BYTE *s) {
+    int len = 0;                                       // tamanho até o 0x18, com cada op conferido
+    for (int o = 0; o < 4096; ) {
+        if (IsBadReadPtr(s + o, 3)) return;
+        int code = s[o], l = s[o + 1] << 8 | s[o + 2];
+        if (code == 0x18) { len = o + 3; break; }
+        if (l < 3) return;
+        o += l;
+    }
+    if (!len || IsBadReadPtr(s, len)) return;
+    float sc = *(volatile float *)0x639efc; if (!(sc > 0.25f && sc < 4)) sc = 1;
+    MC_RUN r[24]; int n = mc_scan(s, len, (const BYTE *)0x4cf370, sc, r, 24);
+    for (int k = 0; k < n; k++) {
+        if (r[k].align != MC_LEFT && r[k].align != MC_RIGHT) continue;
+        BYTE *p = s + r[k].xoff; int i = mc_orig(p);
+        r[k].x = g_mc_x[i].orig;
+        if (g_mc_curn < 64) { g_mc_cur[g_mc_curn].p = p; g_mc_cur[g_mc_curn].r = r[k]; g_mc_curn++; }
+        int used = 0;
+        for (int j = 0; j < g_mc_usedn; j++) if (g_mc_used[j] == p) { used = 1; break; }
+        short want = (short)(used ? g_mc_x[i].orig + g_mc_shift : g_mc_x[i].orig);
+        if (want != g_mc_x[i].written && !IsBadWritePtr(p, 2)) { p[0] = (BYTE)((unsigned short)want >> 8); p[1] = (BYTE)want; g_mc_x[i].written = want; }
+    }
+}
+static void mc_frame_end(void) {
+    if (!cfg.center_menus) return;
+    MC_RUN r[64] = { { 0 } }; unsigned char use[64]; int n = g_mc_curn;
+    for (int i = 0; i < n; i++) r[i] = g_mc_cur[i].r;
+    int sh = mc_shift(r, n, use), un = 0;
+    for (int i = 0; i < n; i++) if (use[i] && un < 64) g_mc_used[un++] = g_mc_cur[i].p;
+    if (sh != g_mc_shift || un != g_mc_usedn) {
+        static int nl; if (un && nl++ < 10) logf_("menu nome/valor centralizado: %d trechos, x %+d", un, sh);
+    }
+    g_mc_usedn = un; g_mc_shift = sh; g_mc_curn = 0;
+}
+static void __cdecl txt_hook(const DWORD *sp) {
+    if (cfg.hud_probe) txt_log(sp);
+    if (cfg.center_menus && sp[2]) mc_text((BYTE *)sp[2]);
+}
+static void install_text_hook(void) {
+    if (!cfg.center_menus && !cfg.hud_probe) return;
+    static const BYTE e0[] = { 0x81, 0xec, 0xcc, 0x00, 0x00, 0x00 };   // 0x466ce0: sub esp, 0xcc (função de texto)
+    if (memcmp((void *)0x466ce0, e0, sizeof e0)) { logf_("texto: bytes inesperados em 0x466ce0, menus sem centralizar"); return; }
+    BYTE *s0 = stub_mem(64), *q = s0;
+    *q++ = 0x60;                                                          // pushad
+    *q++ = 0x8d; *q++ = 0x44; *q++ = 0x24; *q++ = 0x20;                   // lea eax, [esp+0x20] (esp original)
+    *q++ = 0x50;                                                          // push eax
+    *q++ = 0xe8; *(DWORD *)q = (DWORD)txt_hook - (DWORD)(q + 4); q += 4;  // call txt_hook
+    *q++ = 0x83; *q++ = 0xc4; *q++ = 0x04; *q++ = 0x61;                   // add esp, 4 / popad
+    memcpy(q, e0, sizeof e0); q += sizeof e0;
+    put_jmp(q, (void *)0x466ce6);
+    write_site(0x466ce0, e0, sizeof e0, s0, "texto do jogo");
+}
 static void install_op14_probe(void) {
-    static const BYTE e0[] = { 0x81, 0xec, 0xcc, 0x00, 0x00, 0x00 };   // 0x466ce0: sub esp, 0xcc
-    if (!memcmp((void *)0x466ce0, e0, sizeof e0)) {
-        BYTE *s0 = stub_mem(64), *q = s0;
-        *q++ = 0x60;                                                          // pushad
-        *q++ = 0x8d; *q++ = 0x44; *q++ = 0x24; *q++ = 0x20;                   // lea eax, [esp+0x20] (esp original)
-        *q++ = 0x50;                                                          // push eax
-        *q++ = 0xe8; *(DWORD *)q = (DWORD)txt_log - (DWORD)(q + 4); q += 4;   // call txt_log
-        *q++ = 0x83; *q++ = 0xc4; *q++ = 0x04; *q++ = 0x61;                   // add esp, 4 / popad
-        memcpy(q, e0, sizeof e0); q += sizeof e0;
-        put_jmp(q, (void *)0x466ce6);
-        write_site(0x466ce0, e0, sizeof e0, s0, "texto do jogo");
-    } else logf_("texto: bytes inesperados em 0x466ce0");
     static const BYTE e[] = { 0x8b, 0xfa, 0x83, 0xff, 0x14 };   // mov edi, edx / cmp edi, 0x14
     if (memcmp((void *)0x4673c6, e, sizeof e)) { logf_("op14: bytes inesperados"); return; }
     BYTE *st = stub_mem(64), *p = st;
@@ -4043,6 +4108,7 @@ static void init(HMODULE self) {
     hd_load_list();
     install_pal_hook();
     install_pad_prompts();
+    install_text_hook();
     if (cfg.hud_probe) install_op14_probe();
     load_keymap();
     logf_("config: aspect=%d msaa=%d vsync=%d xinput=%d unlock_dinput_joystick=%d", cfg.aspect, cfg.msaa, cfg.vsync, cfg.xinput, cfg.unlock_joy);
