@@ -285,6 +285,7 @@ static int pr_proj;                                  // diagnóstico do HUD: úl
 static float g_ortho_h = 1440; static int g_ortho_up = 1;   // altura e sentido do último glOrtho (sombra do HUD)
 static void sh_reset(void);
 static void pr_tick(void);
+static void sh_tick(void);
 static int g_scissor_on;
 static long g_frames;
 #define LOGN(counter, lim, ...) do { if (cfg.log_gl && (counter)++ < (lim)) logf_(__VA_ARGS__); } while (0)
@@ -354,7 +355,7 @@ static HGLRC g_hd_rc;                               // contexto dono das textura
 static void mc_frame_end(void);
 static void after_swap(void) {
     g_frames++;
-    pr_tick();
+    pr_tick(); sh_tick();
     mc_frame_end();
     if (scaling_active() && r_Clear && r_Scissor && (g_vx > 0 || g_vy > 0)) {
         // limpa as barras para o próximo quadro (o jogo pode não limpar a cor)
@@ -1839,28 +1840,52 @@ static void pr_fetch(int idx, float *v, float *tc) {
     }
 }
 // sombra do HUD: o glBegin..glEnd de um sprite do HUD em glOrtho fica guardado em vez de ir ao OpenGL; no glEnd a
-// sombra é desenhada e o desenho do jogo vai igual (mesmos vértices, coordenadas e cores, na mesma ordem). Fora do
-// glBegin real dá para ler e salvar o estado do OpenGL (dentro dele glGet/glIsEnabled não valem).
+// sombra é desenhada e o desenho do jogo vai igual (mesmos vértices, coordenadas, cores e normais, na mesma ordem).
+// Sem o glBegin real, as chamadas de cor/coordenada/normal do jogo (qualquer variante, com gancho ou não) só mudam o
+// valor corrente do OpenGL, que é lido em cada vértice guardado (fora do glBegin o glGet vale).
 typedef struct { float x, y, s, t; } hud_vert;
-typedef struct { float x, y, z, s, t, c[4]; } SH_VERT;
-static SH_VERT sh_v[48]; static int sh_n, sh_cap; static GLenum sh_mode; static float sh_tc[2], sh_cc[4];
+typedef struct { float x, y, z, tc[4], c[4], n[3]; } SH_VERT;
+typedef struct { float tc[4], c[4], n[3]; } SH_CUR;
+static SH_VERT sh_v[48]; static int sh_n, sh_cap; static GLenum sh_mode;
 static GLuint sh_tex;
+static void sh_cur_get(SH_CUR *c) { glGetFloatv(GL_CURRENT_TEXTURE_COORDS, c->tc); glGetFloatv(GL_CURRENT_COLOR, c->c); glGetFloatv(GL_CURRENT_NORMAL, c->n); }
+static void sh_cur_set(const SH_CUR *c) { glTexCoord4fv(c->tc); glColor4fv(c->c); glNormal3fv(c->n); }
+static unsigned sh_dbg[8];                     // diagnóstico: sprite, proj, modo, sem entrada, ruim, guardado, retângulo, não-retângulo
 static int sh_wants(GLenum m) {
-    if (!cfg.hud_shadow || pr_kind != HUD_SPRITE || pr_proj != 1 || (m != GL_TRIANGLES && m != GL_QUADS)) return 0;
+    if (!cfg.hud_shadow || pr_kind != HUD_SPRITE) return 0;
+    sh_dbg[0]++;
+    if (pr_proj != 1) { sh_dbg[1]++; return 0; }
+    if (m != GL_TRIANGLES && m != GL_QUADS) { sh_dbg[2]++; return 0; }
     SHADOW *e = sh_find(pr_tex);
-    return e && !e->bad;
+    if (!e) { sh_dbg[3]++; return 0; }
+    if (e->bad) { sh_dbg[4]++; return 0; }
+    sh_dbg[5]++;
+    return 1;
 }
-static void sh_replay(void) {
+static void sh_tick(void) {                     // resumo a cada 10 s no primeiro minuto da fase
+    static DWORD t0; static int nl;
+    if (!cfg.hud_shadow || nl >= 6 || !sh_dbg[0]) return;
+    DWORD now = GetTickCount(); if (!t0) t0 = now;
+    if (now - t0 < 10000) return;
+    t0 = now; nl++;
+    logf_("sombra do HUD (10 s): sprites %u proj %u modo %u sem-entrada %u ruim %u guardados %u retangulos %u outros %u | %d texturas com alfa guardado (proj atual %d)",
+          sh_dbg[0], sh_dbg[1], sh_dbg[2], sh_dbg[3], sh_dbg[4], sh_dbg[5], sh_dbg[6], sh_dbg[7], g_sh_n, pr_proj);
+    memset(sh_dbg, 0, sizeof sh_dbg);
+}
+// glBegin real + os vértices guardados; depois o valor corrente volta a `cur` (o que o jogo deixou)
+static void sh_replay(const SH_CUR *cur) {
     glBegin(sh_mode);
-    for (int i = 0; i < sh_n; i++) { glColor4fv(sh_v[i].c); glTexCoord2f(sh_v[i].s, sh_v[i].t); glVertex3f(sh_v[i].x, sh_v[i].y, sh_v[i].z); }
-    glColor4fv(sh_cc); glTexCoord2f(sh_tc[0], sh_tc[1]);   // estado corrente igual ao que o jogo deixou
+    for (int i = 0; i < sh_n; i++) { glColor4fv(sh_v[i].c); glTexCoord4fv(sh_v[i].tc); glNormal3fv(sh_v[i].n); glVertex3f(sh_v[i].x, sh_v[i].y, sh_v[i].z); }
+    sh_cur_set(cur);
 }
 // 1 = vértice guardado; cheio: o que já veio vai ao OpenGL e o resto passa direto (sem sombra neste desenho)
 static int sh_vtx(float x, float y, float z) {
     if (!sh_cap) return 0;
-    if (sh_n == (int)(sizeof sh_v / sizeof *sh_v)) { sh_replay(); sh_cap = 0; return 0; }
+    SH_CUR cur; sh_cur_get(&cur);
+    if (sh_n == (int)(sizeof sh_v / sizeof *sh_v)) { sh_replay(&cur); sh_cap = 0; return 0; }
     SH_VERT *v = &sh_v[sh_n++];
-    v->x = x; v->y = y; v->z = z; v->s = sh_tc[0]; v->t = sh_tc[1]; memcpy(v->c, sh_cc, sizeof v->c);
+    v->x = x; v->y = y; v->z = z;
+    memcpy(v->tc, cur.tc, sizeof v->tc); memcpy(v->c, cur.c, sizeof v->c); memcpy(v->n, cur.n, sizeof v->n);
     return 1;
 }
 #ifndef GL_CLAMP_TO_EDGE
@@ -1869,7 +1894,7 @@ static int sh_vtx(float x, float y, float z) {
 // textura da sombra de um sprite, feita no primeiro desenho: desfoque de 0,4% da altura da tela, em texels por eixo
 static int sh_make(SHADOW *e, const hud_vert v[4]) {
     float ux = fabsf(v[1].x - v[0].x) / (fabsf(v[1].s - v[0].s) * e->w), uy = fabsf(v[3].y - v[0].y) / (fabsf(v[3].t - v[0].t) * e->h);
-    if (!(ux > 0.01f) || !(uy > 0.01f)) { e->bad = 1; return 0; }
+    if (!(ux > 0.01f) || !(uy > 0.01f)) { e->bad = 1; logf_("sombra do HUD: textura %u com escala estranha (%.3f x %.3f)", e->name, ux, uy); return 0; }
     float sig = 0.004f * g_ortho_h, sx = sig / ux, sy = sig / uy;
     if (sx > 20) sx = 20; if (sy > 20) sy = 20;
     e->padx = (int)ceilf(3 * sx) + 1; e->pady = (int)ceilf(3 * sy) + 1;
@@ -1923,7 +1948,11 @@ static void hud_on_quad(GLuint tex, const hud_vert v[4], float z, float alpha) {
 static void sh_batch(void) {
     int k = sh_mode == GL_QUADS ? 4 : 6;
     for (int g = 0; g + k <= sh_n; g += k) {
-        const SH_VERT *q = &sh_v[g];
+        struct { float x, y, z, s, t, a; } q[6];
+        for (int i = 0; i < k; i++) {
+            const SH_VERT *o = &sh_v[g + i]; float w = o->tc[3] != 0 ? o->tc[3] : 1;
+            q[i].x = o->x; q[i].y = o->y; q[i].z = o->z; q[i].s = o->tc[0] / w; q[i].t = o->tc[1] / w; q[i].a = o->c[3];
+        }
         int i0 = 0, i1 = 0, j0 = 0, j1 = 0;
         for (int i = 1; i < k; i++) {
             if (q[i].s < q[i0].s) i0 = i; if (q[i].s > q[i1].s) i1 = i;
@@ -1935,20 +1964,23 @@ static void sh_batch(void) {
         int ok = 1;
         for (int i = 0; i < k && ok; i++)
             ok = fabsf(q[i].x - (q[i0].x + ax * (q[i].s - s0))) < 1 && fabsf(q[i].y - (q[j0].y + ay * (q[i].t - t0))) < 1;
-        if (!ok) continue;
+        if (!ok) {
+            sh_dbg[7]++;
+            static int nl; if (nl++ < 4) logf_("sombra do HUD: textura %u nao e retangulo alinhado (%d vertices): %.1f,%.1f %.3f,%.3f | %.1f,%.1f %.3f,%.3f | %.1f,%.1f %.3f,%.3f",
+                sh_tex, k, q[0].x, q[0].y, q[0].s, q[0].t, q[1].x, q[1].y, q[1].s, q[1].t, q[2].x, q[2].y, q[2].s, q[2].t);
+            continue;
+        }
+        sh_dbg[6]++;
         float x0 = q[i0].x - ax * s0, y0 = q[j0].y - ay * t0;   // posição em s = 0 / t = 0
         hud_vert v[4] = { { x0 + ax * s0, y0 + ay * t0, s0, t0 }, { x0 + ax * s1, y0 + ay * t0, s1, t0 },
                           { x0 + ax * s1, y0 + ay * t1, s1, t1 }, { x0 + ax * s0, y0 + ay * t1, s0, t1 } };
-        hud_on_quad(sh_tex, v, q[0].z, q[0].c[3]);
+        hud_on_quad(sh_tex, v, q[0].z, q[0].a);
     }
 }
 static void APIENTRY h_BindTexture(GLenum t, GLuint n) { if (t == GL_TEXTURE_2D) { pr_tex = n; pr_kind = hud_tex_kind(n); } r_BindTexture(t, n); }
 static void APIENTRY h_Begin(GLenum m) {
     pr_count(PR_BEGIN); pr_in = 1; pr_mode = (int)m; pr_nv = 0;
     if (sh_wants(m)) {                              // guarda em vez de começar: a sombra vai antes
-        float t4[4] = { 0, 0, 0, 1 };
-        glGetFloatv(GL_CURRENT_TEXTURE_COORDS, t4); sh_tc[0] = t4[0]; sh_tc[1] = t4[1];
-        glGetFloatv(GL_CURRENT_COLOR, sh_cc);
         sh_cap = 1; sh_mode = m; sh_n = 0; sh_tex = pr_tex;
         return;
     }
@@ -1974,8 +2006,9 @@ static void APIENTRY h_End(void) {
     if (pr_in && pr_frame_dump == 2) pr_dump_batch();
     if (sh_cap) {                                   // sombra, depois o desenho do jogo como veio
         sh_cap = 0;
+        SH_CUR cur; sh_cur_get(&cur);               // valor corrente que o jogo deixou no fim do desenho
         sh_batch();
-        sh_replay(); glEnd();
+        sh_replay(&cur); glEnd();
         pr_in = 0;
         return;
     }
@@ -1996,27 +2029,22 @@ static void (APIENTRY *r_Color4f)(GLfloat, GLfloat, GLfloat, GLfloat);
 static void (APIENTRY *r_Color4fv)(const GLfloat *);
 static void (APIENTRY *r_Color3f)(GLfloat, GLfloat, GLfloat);
 static void (APIENTRY *r_Color3ub)(GLubyte, GLubyte, GLubyte);
-// devolvem 1 quando o desenho está sendo guardado para a sombra (o valor fica para a repetição)
-static int pr_tcx(float s0, float t0) { pr_count(PR_TCX); pr_cur_tc[0] = s0; pr_cur_tc[1] = t0; if (!sh_cap) return 0; sh_tc[0] = s0; sh_tc[1] = t0; return 1; }
-static int pr_color(float r, float g, float b, float a) {
-    pr_count(PR_COLOR); pr_col[0] = r; pr_col[1] = g; pr_col[2] = b; pr_col[3] = a;
-    if (!sh_cap) return 0;
-    sh_cc[0] = r; sh_cc[1] = g; sh_cc[2] = b; sh_cc[3] = a; return 1;
-}
-static void APIENTRY h_TexCoord2d(GLdouble a, GLdouble b) { if (!pr_tcx((float)a, (float)b)) r_TexCoord2d(a, b); }
-static void APIENTRY h_TexCoord2dv(const GLdouble *p) { if (!pr_tcx((float)p[0], (float)p[1])) r_TexCoord2dv(p); }
-static void APIENTRY h_TexCoord2i(GLint a, GLint b) { if (!pr_tcx((float)a, (float)b)) r_TexCoord2i(a, b); }
-static void APIENTRY h_TexCoord2s(GLshort a, GLshort b) { if (!pr_tcx(a, b)) r_TexCoord2s(a, b); }
-static void APIENTRY h_TexCoord3f(GLfloat a, GLfloat b, GLfloat c) { if (!pr_tcx(a, b)) r_TexCoord3f(a, b, c); }
-static void APIENTRY h_TexCoord3fv(const GLfloat *p) { if (!pr_tcx(p[0], p[1])) r_TexCoord3fv(p); }
-static void APIENTRY h_TexCoord4f(GLfloat a, GLfloat b, GLfloat c, GLfloat d) { if (!pr_tcx(d != 0 ? a / d : a, d != 0 ? b / d : b)) r_TexCoord4f(a, b, c, d); }
-static void APIENTRY h_TexCoord4fv(const GLfloat *p) { if (!pr_tcx(p[3] != 0 ? p[0] / p[3] : p[0], p[3] != 0 ? p[1] / p[3] : p[1])) r_TexCoord4fv(p); }
-static void APIENTRY h_Color4ub(GLubyte r, GLubyte g, GLubyte b, GLubyte a) { if (!pr_color(r / 255.f, g / 255.f, b / 255.f, a / 255.f)) r_Color4ub(r, g, b, a); }
-static void APIENTRY h_Color4ubv(const GLubyte *p) { if (!pr_color(p[0] / 255.f, p[1] / 255.f, p[2] / 255.f, p[3] / 255.f)) r_Color4ubv(p); }
-static void APIENTRY h_Color4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a) { if (!pr_color(r, g, b, a)) r_Color4f(r, g, b, a); }
-static void APIENTRY h_Color4fv(const GLfloat *p) { if (!pr_color(p[0], p[1], p[2], p[3])) r_Color4fv(p); }
-static void APIENTRY h_Color3f(GLfloat r, GLfloat g, GLfloat b) { if (!pr_color(r, g, b, 1)) r_Color3f(r, g, b); }
-static void APIENTRY h_Color3ub(GLubyte r, GLubyte g, GLubyte b) { if (!pr_color(r / 255.f, g / 255.f, b / 255.f, 1)) r_Color3ub(r, g, b); }
+static void pr_tcx(float s0, float t0) { pr_count(PR_TCX); pr_cur_tc[0] = s0; pr_cur_tc[1] = t0; }
+static void pr_color(float r, float g, float b, float a) { pr_count(PR_COLOR); pr_col[0] = r; pr_col[1] = g; pr_col[2] = b; pr_col[3] = a; }
+static void APIENTRY h_TexCoord2d(GLdouble a, GLdouble b) { pr_tcx((float)a, (float)b); r_TexCoord2d(a, b); }
+static void APIENTRY h_TexCoord2dv(const GLdouble *p) { pr_tcx((float)p[0], (float)p[1]); r_TexCoord2dv(p); }
+static void APIENTRY h_TexCoord2i(GLint a, GLint b) { pr_tcx((float)a, (float)b); r_TexCoord2i(a, b); }
+static void APIENTRY h_TexCoord2s(GLshort a, GLshort b) { pr_tcx(a, b); r_TexCoord2s(a, b); }
+static void APIENTRY h_TexCoord3f(GLfloat a, GLfloat b, GLfloat c) { pr_tcx(a, b); r_TexCoord3f(a, b, c); }
+static void APIENTRY h_TexCoord3fv(const GLfloat *p) { pr_tcx(p[0], p[1]); r_TexCoord3fv(p); }
+static void APIENTRY h_TexCoord4f(GLfloat a, GLfloat b, GLfloat c, GLfloat d) { pr_tcx(d != 0 ? a / d : a, d != 0 ? b / d : b); r_TexCoord4f(a, b, c, d); }
+static void APIENTRY h_TexCoord4fv(const GLfloat *p) { pr_tcx(p[3] != 0 ? p[0] / p[3] : p[0], p[3] != 0 ? p[1] / p[3] : p[1]); r_TexCoord4fv(p); }
+static void APIENTRY h_Color4ub(GLubyte r, GLubyte g, GLubyte b, GLubyte a) { pr_color(r / 255.f, g / 255.f, b / 255.f, a / 255.f); r_Color4ub(r, g, b, a); }
+static void APIENTRY h_Color4ubv(const GLubyte *p) { pr_color(p[0] / 255.f, p[1] / 255.f, p[2] / 255.f, p[3] / 255.f); r_Color4ubv(p); }
+static void APIENTRY h_Color4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a) { pr_color(r, g, b, a); r_Color4f(r, g, b, a); }
+static void APIENTRY h_Color4fv(const GLfloat *p) { pr_color(p[0], p[1], p[2], p[3]); r_Color4fv(p); }
+static void APIENTRY h_Color3f(GLfloat r, GLfloat g, GLfloat b) { pr_color(r, g, b, 1); r_Color3f(r, g, b); }
+static void APIENTRY h_Color3ub(GLubyte r, GLubyte g, GLubyte b) { pr_color(r / 255.f, g / 255.f, b / 255.f, 1); r_Color3ub(r, g, b); }
 static void APIENTRY h_Vertex2f(GLfloat x, GLfloat y) { pr_count(PR_V2F); pr_vert(x, y, 0, 1); if (!sh_vtx(x, y, 0)) r_Vertex2f(x, y); }
 static void APIENTRY h_Vertex2fv(const GLfloat *p) { pr_count(PR_V2FV); pr_vert(p[0], p[1], 0, 1); if (!sh_vtx(p[0], p[1], 0)) r_Vertex2fv(p); }
 static void APIENTRY h_Vertex2i(GLint x, GLint y) { pr_count(PR_V2I); pr_vert((float)x, (float)y, 0, 1); if (!sh_vtx((float)x, (float)y, 0)) r_Vertex2i(x, y); }
@@ -2026,8 +2054,8 @@ static void APIENTRY h_Vertex3fv(const GLfloat *p) { pr_count(PR_V3FV); pr_vert(
 static void APIENTRY h_Vertex3i(GLint x, GLint y, GLint z) { pr_count(PR_V3I); pr_vert((float)x, (float)y, (float)z, 1); if (!sh_vtx((float)x, (float)y, (float)z)) r_Vertex3i(x, y, z); }
 static void APIENTRY h_Vertex4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w) { pr_count(PR_V4F); pr_vert(x, y, z, w); if (!sh_vtx(x, y, z)) r_Vertex4f(x, y, z, w); }
 static void APIENTRY h_Vertex4fv(const GLfloat *p) { pr_count(PR_V4FV); pr_vert(p[0], p[1], p[2], p[3]); if (!sh_vtx(p[0], p[1], p[2])) r_Vertex4fv(p); }
-static void APIENTRY h_TexCoord2f(GLfloat s0, GLfloat t0) { pr_count(PR_TC2F); pr_cur_tc[0] = s0; pr_cur_tc[1] = t0; if (sh_cap) { sh_tc[0] = s0; sh_tc[1] = t0; return; } r_TexCoord2f(s0, t0); }
-static void APIENTRY h_TexCoord2fv(const GLfloat *p) { pr_count(PR_TC2FV); pr_cur_tc[0] = p[0]; pr_cur_tc[1] = p[1]; if (sh_cap) { sh_tc[0] = p[0]; sh_tc[1] = p[1]; return; } r_TexCoord2fv(p); }
+static void APIENTRY h_TexCoord2f(GLfloat s0, GLfloat t0) { pr_count(PR_TC2F); pr_cur_tc[0] = s0; pr_cur_tc[1] = t0; r_TexCoord2f(s0, t0); }
+static void APIENTRY h_TexCoord2fv(const GLfloat *p) { pr_count(PR_TC2FV); pr_cur_tc[0] = p[0]; pr_cur_tc[1] = p[1]; r_TexCoord2fv(p); }
 static void APIENTRY h_VertexPointer(GLint n, GLenum t, GLsizei st, const void *p) { pr_vp.size = n; pr_vp.type = t; pr_vp.stride = st; pr_vp.ptr = p; r_VertexPointer(n, t, st, p); }
 static void APIENTRY h_TexCoordPointer(GLint n, GLenum t, GLsizei st, const void *p) { pr_tp.size = n; pr_tp.type = t; pr_tp.stride = st; pr_tp.ptr = p; r_TexCoordPointer(n, t, st, p); }
 static void APIENTRY h_DrawArrays(GLenum m, GLint first, GLsizei n) {
