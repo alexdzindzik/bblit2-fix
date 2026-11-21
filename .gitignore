@@ -7,3 +7,4 @@ build/
 *.xa
 tools/hd_menu/cache/
 __pycache__/
+.superpowers/
