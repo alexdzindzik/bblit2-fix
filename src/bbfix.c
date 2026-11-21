@@ -16,6 +16,7 @@
 #include <math.h>
 #include <GL/gl.h>
 #include "hud_math.h"
+#include "pad_cursor.h"
 
 #define FIX_VERSION "0.12.1"
 
@@ -1859,7 +1860,14 @@ static LPARAM map_mouse(LPARAM lp) {
     if (gy < 0) gy = 0; if (gy >= g_gh) gy = g_gh - 1;
     return MAKELPARAM(gx, gy);
 }
+// cursor do mouse: some enquanto o controle navega pelos menus 2D e volta quando o mouse de verdade se move
+static PADCUR g_padcur;
+static void padcur_apply(int act) {
+    if (act == PADCUR_HIDE) ShowCursor(FALSE);
+    else if (act == PADCUR_SHOW) ShowCursor(TRUE);
+}
 static LRESULT CALLBACK game_proc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
+    if (m == WM_MOUSEMOVE && g_padcur.hidden) { POINT c; if (GetCursorPos(&c)) padcur_apply(padcur_mouse(&g_padcur, c.x, c.y)); }
     switch (m) {
     case WM_ACTIVATE:
         // o jogo "suspende" (destrói o OpenGL e recria a janela) ao perder o foco; com background=1 ele segue rodando
@@ -3107,6 +3115,7 @@ static void fe_hover(const FEITEM *f) {
     POINT p; fe_point(f, &p);
     POINT s = p; ClientToScreen(g_hwnd, &s);
     SetCursorPos(s.x, s.y);
+    padcur_apply(padcur_nav(&g_padcur, s.x, s.y));
     PostMessageA(g_hwnd, WM_MOUSEMOVE, 0, MAKELPARAM(p.x, p.y));
 }
 static void fe_click(const FEITEM *f) {
@@ -3150,7 +3159,7 @@ static void fe_pad(void) {
     if (now - last < 10) return;
     last = now;
     BYTE *d = fe_menu();
-    if (!d || *(volatile int *)0x639730 || !g_hwnd || !game_has_focus()) { prev = 0xffff; dir_prev = 0; return; }
+    if (!d || *(volatile int *)0x639730 || !g_hwnd || !game_has_focus()) { prev = 0xffff; dir_prev = 0; padcur_apply(padcur_leave(&g_padcur)); return; }
     if (!x_GetState) { static int tried; if (tried) return; tried = 1; init_xinput(); if (!x_GetState) return; }
     XSTATE st; int got = -1;
     for (DWORD i = 0; i < 4 && got < 0; i++) if (x_GetState(i, &st) == 0) got = (int)i;
@@ -3746,6 +3755,34 @@ static int __cdecl kn_text(int sc, char *buf) {
     g_kn_icon = 0;
     return ((PFN_KeyName)0x40fbe0)(sc, buf);
 }
+// hud_probe: registra o texto cru de cada mensagem que pede uma tecla (op 0x14 em 0x4673c6), uma vez por mensagem
+static void __cdecl op14_log(DWORD id, const BYTE *txt, DWORD pos) {
+    static DWORD seen[48]; static int nseen, nl;
+    if (nl >= 60 || !txt || IsBadReadPtr(txt, 96)) return;
+    DWORD h = 2166136261u ^ (id & 0xff);
+    for (int i = 0; i < 24; i++) h = (h ^ txt[i]) * 16777619u;
+    for (int i = 0; i < nseen; i++) if (seen[i] == h) return;
+    if (nseen < 48) seen[nseen++] = h;
+    char hx[96 * 3 + 1], as[97]; int o = 0;
+    for (int i = 0; i < 96; i++) { o += snprintf(hx + o, sizeof hx - o, "%02x ", txt[i]); as[i] = txt[i] >= 32 && txt[i] < 127 ? (char)txt[i] : '.'; }
+    as[96] = 0;
+    const BYTE *st = *(BYTE **)0x639f70;
+    logf_("op14: acao %02lx pos %lu esquema %d estado %lx | %s| %s", id & 0xff, pos & 0xffff, st ? st[0x95] : -1, st ? *(DWORD *)st : 0, as, hx);
+    nl++;
+}
+static void install_op14_probe(void) {
+    static const BYTE e[] = { 0x8b, 0xfa, 0x83, 0xff, 0x14 };   // mov edi, edx / cmp edi, 0x14
+    if (memcmp((void *)0x4673c6, e, sizeof e)) { logf_("op14: bytes inesperados"); return; }
+    BYTE *st = stub_mem(64), *p = st;
+    *p++ = 0x60;                                                          // pushad
+    *p++ = 0x56; *p++ = 0x53; *p++ = 0x52;                                // push esi / push ebx / push edx
+    *p++ = 0xe8; *(DWORD *)p = (DWORD)op14_log - (DWORD)(p + 4); p += 4;  // call op14_log
+    *p++ = 0x83; *p++ = 0xc4; *p++ = 0x0c;                                // add esp, 12
+    *p++ = 0x61;                                                          // popad
+    memcpy(p, e, sizeof e); p += sizeof e;                                // instruções originais (a flag do cmp segue)
+    p += put_jmp(p, (void *)0x4673cb);
+    write_site(0x4673c6, e, sizeof e, st, "op14 (texto das dicas)");
+}
 static void install_pad_prompts(void) {
     if (!cfg.xinput || !cfg.pad_prompts) return;
     BYTE *call = (BYTE *)0x467667;
@@ -3908,6 +3945,7 @@ static void init(HMODULE self) {
     hd_load_list();
     install_pal_hook();
     install_pad_prompts();
+    if (cfg.hud_probe) install_op14_probe();
     load_keymap();
     logf_("config: aspect=%d msaa=%d vsync=%d xinput=%d unlock_dinput_joystick=%d", cfg.aspect, cfg.msaa, cfg.vsync, cfg.xinput, cfg.unlock_joy);
 }

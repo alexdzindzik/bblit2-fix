@@ -6,9 +6,11 @@ mkdir -p build
 # testes das contas puras (gcc do Linux) antes da DLL
 gcc -std=c11 -O2 -Wall -Wextra -Wredundant-decls -o build/test_hud_math tests/test_hud_math.c src/hud_math.c -lm
 build/test_hud_math
+gcc -std=c11 -O2 -Wall -Wextra -Wredundant-decls -o build/test_pad_cursor tests/test_pad_cursor.c src/pad_cursor.c
+build/test_pad_cursor
 i686-w64-mingw32-gcc -std=c11 -O2 -msse2 -mfpmath=sse -Wall -Wextra -Wredundant-decls -Wno-unused-parameter -Wno-cast-function-type -Wno-misleading-indentation \
     -shared -static-libgcc -Wl,--enable-stdcall-fixup \
-    -o build/dinput.dll src/bbfix.c src/hud_math.c src/dinput.def -lopengl32 -lgdi32 -luser32 -ladvapi32
+    -o build/dinput.dll src/bbfix.c src/hud_math.c src/pad_cursor.c src/dinput.def -lopengl32 -lgdi32 -luser32 -ladvapi32
 i686-w64-mingw32-strip build/dinput.dll
 cp dist/bblit2fix.ini build/
 ls -la build/
