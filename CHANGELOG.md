@@ -1,5 +1,11 @@
 # Histórico de versões
 
+## 0.13
+- **HUD da fase em HD (opcional)**: o mod salva as texturas do HUD em `bin\hd\hud\fonte` e usa a versão 4× de `bin\hd\hud` gerada pelo `tools/hd_menu/make_pack.py`. As silhuetas do Pernalonga e do Taz são retraçadas em curvas (sem serrilhado, mantendo olhos, dedos e pernas); números, espelho, medalhas e setas passam pelo Real-ESRGAN; os degradês das barras são ampliados. Sem o pacote, continua o xBR (`hud_hd`).
+- **Sombra suave** atrás das silhuetas e dos ícones do HUD, para destacá-los do cenário (`[hud] shadow=45`; 0 desliga).
+- O `make_pack.py` gera também a folha `hud_comparacao.png` (original × HD) e passa a precisar do `opencv-python` e do `scikit-image`.
+- As barras de vida continuam com a animação do próprio jogo (ele já desce e sobe a barra aos poucos).
+
 ## 0.12.2
 - **Correção**: com o controle conectado, as dicas não mostravam Ⓐ Ⓑ Ⓧ Ⓨ ("PARA AJUDA." sem o botão). O mod usava caracteres que não existem na fonte do jogo; agora usa os do PlayStation que existem (`0xac`–`0xaf`).
 - **Ícones do controle redondos**, todos do mesmo tamanho e na altura das letras (o jogo desenha cada tipo de ícone num quadro de proporção diferente).
