@@ -3695,15 +3695,48 @@ static void write_site(DWORD va, const BYTE *expect, int n, void *stub, const ch
     (void)expect;
     logf_("%s: gancho em %08lx", name, va);
 }
+// Alcance de cada objeto: o jogo compara a distância com o alcance do objeto (word +0x76) e desliga quem está fora.
+// O mod multiplica esse alcance. Diagnóstico (debug=1): registra os objetos que só ficam ligados por causa do mod e
+// F6 escolhe um tipo deles para ficar com o alcance original (para achar o que esconde o Piu-Piu).
+static struct { BYTE cat; WORD id; } g_rtypes[64]; static int g_rtypen, g_rexcl = -1;
+static int rtype_index(BYTE cat, WORD id, int add) {
+    for (int i = 0; i < g_rtypen; i++) if (g_rtypes[i].cat == cat && g_rtypes[i].id == id) return i;
+    if (add && g_rtypen < 64) { g_rtypes[g_rtypen].cat = cat; g_rtypes[g_rtypen].id = id; return g_rtypen++; }
+    return -1;
+}
+static DWORD __cdecl range_decide(const BYTE *o, DWORD dist, DWORD range) {
+    DWORD eff = (DWORD)(((unsigned long long)range * (DWORD)g_kr) >> 8);
+    if (!cfg.debug || g_kr == 256) return eff;
+    BYTE cat = o[0x31]; WORD id = *(const WORD *)(o + 0x14c);
+    int band = dist > range && dist <= eff;            // ligado só por causa do mod
+    int ti = rtype_index(cat, id, band);
+    if (band) {
+        static const BYTE *seen[400]; static int ns, nl;
+        int k; for (k = 0; k < ns; k++) if (seen[k] == o) break;
+        if (k == ns && ns < 400 && nl < 300) {
+            seen[ns++] = o; nl++;
+            logf_("alcance: obj %p tipo %d (cat %02x id %04x) flags6e %04x f8 %08lx f24 %08lx w36 %04x p9c %08lx p118 %08lx alcance %lu dist %lu",
+                  (const void *)o, ti, cat, id, *(const WORD *)(o + 0x6e), *(const DWORD *)(o + 8), *(const DWORD *)(o + 0x24),
+                  *(const WORD *)(o + 0x36), *(const DWORD *)(o + 0x9c), *(const DWORD *)(o + 0x118), range, dist);
+        }
+    }
+    if (g_rexcl >= 0 && ti == g_rexcl) return range;   // F6: esse tipo fica com o alcance original
+    return eff;
+}
 static void install_object_hooks(void) {
     g_kr = cfg.actor_dist * 256 / 100;
     // alcance: 0x45f36b  mov ecx,[esi] / cmp ecx,eax / jbe 0x45f381   (fora: 0x45f371)
     static const BYTE e1[] = { 0x8b, 0x0e, 0x3b, 0xc8, 0x76, 0x10 };
     if (!memcmp((void *)0x45f36b, e1, sizeof e1)) {
         BYTE *st = stub_mem(64), *p = st;
+        *p++ = 0x51; *p++ = 0x52;                                         // push ecx / push edx
+        *p++ = 0x50;                                                      // push eax (alcance do objeto)
+        *p++ = 0xff; *p++ = 0x36;                                         // push dword [esi] (distância)
+        *p++ = 0x53;                                                      // push ebx (objeto)
+        *p++ = 0xe8; *(DWORD *)p = (DWORD)range_decide - (DWORD)(p + 4); p += 4;   // call range_decide -> eax
+        *p++ = 0x83; *p++ = 0xc4; *p++ = 0x0c;                            // add esp, 12
+        *p++ = 0x5a; *p++ = 0x59;                                         // pop edx / pop ecx
         *p++ = 0x8b; *p++ = 0x0e;                                         // mov ecx, [esi]
-        *p++ = 0x0f; *p++ = 0xaf; *p++ = 0x05; *(DWORD *)p = (DWORD)&g_kr; p += 4;   // imul eax, [g_kr]
-        *p++ = 0xc1; *p++ = 0xf8; *p++ = 0x08;                            // sar eax, 8
         *p++ = 0x3b; *p++ = 0xc8;                                         // cmp ecx, eax
         p += put_jcc(p, 0x86, (void *)0x45f381);                         // jbe dentro
         p += put_jmp(p, (void *)0x45f371);                               // fora
@@ -3972,8 +4005,17 @@ static void install_pad_prompts(void) {
     logf_("dicas de botao: com controle conectado, as teclas viram botoes do Xbox (%s)", cfg.pad_prompts == 2 ? "icones" : "nomes");
 }
 
-// debug=1: F9 passa por alcance/LOD do mod e originais (4 combinações); F11 liga/desliga os efeitos de imagem
+// debug=1: F9 passa por alcance/LOD do mod e originais (4 combinações); F6 escolhe um tipo de objeto para ficar com
+// o alcance original; F11 liga/desliga os efeitos de imagem
 static void debug_keys(void) {
+    static int prev6;
+    int d6 = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
+    if (d6 && !prev6) {
+        g_rexcl = g_rexcl + 1 >= g_rtypen ? -1 : g_rexcl + 1;
+        if (g_rexcl < 0) logf_("F6: todos os tipos com o alcance do mod");
+        else logf_("F6: tipo %d (cat %02x id %04x) com o alcance ORIGINAL", g_rexcl, g_rtypes[g_rexcl].cat, g_rtypes[g_rexcl].id);
+    }
+    prev6 = d6;
     static int prev8;
     int d8 = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
     if (d8 && !prev8) { g_sim_pad = (g_sim_pad + 1) % 3; logf_("F8: controle %s", g_sim_pad == 1 ? "DESCONECTADO (simulado)" : g_sim_pad == 2 ? "CONECTADO (simulado)" : "real"); }
