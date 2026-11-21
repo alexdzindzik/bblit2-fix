@@ -17,6 +17,7 @@
 #include <GL/gl.h>
 #include "hud_math.h"
 #include "pad_cursor.h"
+#include "pad_icons.h"
 
 #define FIX_VERSION "0.12.1"
 
@@ -1137,7 +1138,6 @@ static void tex_dilate(DWORD *p, int w, int h) {
 // ---- ícones do Xbox desenhados pelo mod, no estilo dos ícones do PS1 que sobraram na fonte (botão escuro com aro e
 // símbolo coloridos). Os do PS1 (✕ ○ □ △ L1 R1 "START") nunca aparecem na versão de PC e viram A B X Y LB RB BACK;
 // as teclas Enter e Esc viram A e Menu só enquanto o controle está conectado.
-enum { BTN_A, BTN_B, BTN_X, BTN_Y, BTN_LB, BTN_RB, BTN_LT, BTN_RT, BTN_START, BTN_BACK, BTN_N };
 static const char *k_btn_name[BTN_N] = { "A", "B", "X", "Y", "LB", "RB", "LT", "RT", "START", "BACK" };
 static volatile int g_pad_on;   // há controle XInput conectado
 static const struct { unsigned long long hash; int btn; int cond; } k_icon_tex[] = {
@@ -3726,8 +3726,6 @@ static void install_object_hooks(void) {
 // As mensagens do jogo mostram a tecla configurada entre aspas ("'d' para pular"), pelo op 0x14 do texto
 // (0x467667 chama 0x40fbe0 = GetKeyNameText). Com o controle conectado, a chamada passa por aqui e devolve o botão
 // do Xbox: um byte de ícone da fonte (button_prompts=2, ícones redesenhados) ou o nome ("A", "LB"...).
-// bytes da fonte com os ícones redesenhados: ✕ □ △ ○ do PS1 (0x8c-0x8f), R1 (0x10), L1 (0x12), Esc (0x13), "START" (0x0b)
-static const BYTE g_btn_icon[BTN_N] = { 0x8c, 0x8f, 0x8d, 0x8e, 0x12, 0x10, 0, 0, 0x13, 0x0b };
 static volatile BYTE g_kn_icon;  // a última chamada devolveu um ícone (o texto sai sem aspas)
 static int btn_for_scancode(int sc) {
     const DWORD *keys = (const DWORD *)(0x639f80 + 0x4c);     // teclas atuais do jogador 1 (config.pc na memória)
@@ -3750,7 +3748,7 @@ static int __cdecl kn_text(int sc, char *buf) {
     if (cfg.xinput && cfg.pad_prompts && g_pad_on && buf) {
         int b = btn_for_scancode(sc);
         if (b >= 0) {
-            if (cfg.pad_prompts == 2 && g_btn_icon[b]) { buf[0] = (char)g_btn_icon[b]; buf[1] = 0; g_kn_icon = 1; return 1; }
+            if (cfg.pad_prompts == 2 && pad_icon_char(b)) { buf[0] = (char)pad_icon_char(b); buf[1] = 0; g_kn_icon = 1; return 1; }
             strcpy(buf, k_btn_name[b]); g_kn_icon = 0;
             return (int)strlen(buf);
         }
