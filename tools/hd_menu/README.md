@@ -12,7 +12,7 @@ O mod mistura cada ícone HD com o fundo já pronto, então não aparece o retâ
 ## Como gerar
 
 ```
-pip install numpy scipy pillow onnx onnxruntime
+pip install numpy scipy pillow opencv-python scikit-image onnx onnxruntime
 python make_pack.py "C:\Jogos\BBLIT2\data" "C:\Jogos\BBLIT2\bin"
 ```
 
@@ -26,5 +26,23 @@ Arquivos gerados:
 | `bin\hd\1x\<nome>.bmp` | versão 1× que substitui a original (só a tela inicial e os ícones dela, quando recoloridos) |
 
 Para desligar sem apagar a pasta: `menu_hd=0` em `[video]` no `bblit2fix.ini`.
+
+## HUD em HD (0.13)
+
+O HUD da fase (silhuetas do Pernalonga e do Taz, barras de vida, ícones) vem das texturas do próprio jogo, que só existem enquanto ele roda. Por isso são duas etapas:
+
+1. Com `hud_hd=1` em `[video]`, jogue uma fase até o HUD aparecer. O mod salva cada textura do HUD em `bin\hd\hud\fonte\<hash>.bmp`.
+2. Rode o `make_pack.py` de novo. Ele amplia cada uma 4× e grava em `bin\hd\hud\<hash>.bmp`:
+   - silhuetas em preto e branco são **retraçadas** (o contorno vira curva suave, sem serrilhado e sem o borrão do ESRGAN);
+   - ícones coloridos vão pelo Real-ESRGAN, com o alfa ampliado à parte;
+   - os degradês das barras são só ampliados.
+
+A folha `bin\hd\hud\hud_comparacao.png` mostra cada textura original (ampliada sem suavizar) ao lado da HD. Sem a pasta `hud`, o HUD continua como antes (xBR).
+
+| Arquivo | O que é |
+|---|---|
+| `bin\hd\hud\fonte\<hash>.bmp` | textura original do HUD, exportada pelo mod |
+| `bin\hd\hud\<hash>.bmp` | a mesma, 4×, que o mod usa no lugar |
+| `bin\hd\hud\hud_comparacao.png` | original × HD lado a lado, para conferir |
 
 **As imagens geradas são do jogo: use no seu computador e não distribua o pacote.** Este repositório tem só os scripts.

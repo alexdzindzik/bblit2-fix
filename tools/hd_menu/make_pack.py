@@ -133,6 +133,11 @@ def main():
             up = (big * (1 - m4) + up * m4 + 0.5).astype(np.uint8)
         save_bmp(up, os.path.join(hd, files[n]))
         print('%-18s %4dx%-4d -> %dx%d  %.1fs' % (files[n], img.shape[1], img.shape[0], up.shape[1], up.shape[0], time.time() - t0))
+    # HUD: texturas exportadas pelo mod em bin\hd\hud\fonte (com hud_hd=1); sem a pasta, nada a fazer
+    if not a.so:
+        from hud import build_hud_pack
+        n = build_hud_pack(a.bin, sess)
+        if n: print('HUD: %d texturas em %s' % (n, os.path.join(hd, 'hud')))
 
 if __name__ == '__main__':
     main()
