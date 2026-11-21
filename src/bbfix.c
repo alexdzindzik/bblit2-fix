@@ -345,11 +345,9 @@ static void icons_sync(void);
 static void hd_reset(void);
 static HGLRC g_hd_rc;                               // contexto dono das texturas marcadas como HD
 static void mc_frame_end(void);
-static void objlist_stats(void);
 static void after_swap(void) {
     g_frames++;
     pr_tick();
-    if (cfg.debug) objlist_stats();
     mc_frame_end();
     if (scaling_active() && r_Clear && r_Scissor && (g_vx > 0 || g_vy > 0)) {
         // limpa as barras para o próximo quadro (o jogo pode não limpar a cor)
@@ -3697,33 +3695,7 @@ static void write_site(DWORD va, const BYTE *expect, int n, void *stub, const ch
     (void)expect;
     logf_("%s: gancho em %08lx", name, va);
 }
-// Lista de objetos por quadro em 0x4d2820 (contador word em 0x4d2b6a), consumida em 0x464410: o jogo só aceita 40
-// (0x28) e descarta o resto. Hipótese do Piu-Piu: com o alcance do mod, entram mais de 40 e ele fica de fora. A lista
-// vai para um vetor nosso de 128; o limite fica em 127 (F7 com debug=1 volta para 40, para comparar).
-static DWORD g_objlist[128];
-static int g_objlist_on;
-static void objlist_cap(int cap) {
-    BYTE *c1 = (BYTE *)0x45fb71, *c2 = (BYTE *)0x4651d2; DWORD o;
-    VirtualProtect(c1, 2, PAGE_EXECUTE_READWRITE, &o); *(WORD *)c1 = (WORD)cap; VirtualProtect(c1, 2, o, &o);
-    VirtualProtect(c2, 1, PAGE_EXECUTE_READWRITE, &o); *c2 = (BYTE)cap; VirtualProtect(c2, 1, o, &o);
-    FlushInstructionCache(GetCurrentProcess(), NULL, 0);
-}
-static void install_objlist(void) {
-    static const BYTE a[] = { 0x68, 0x20, 0x28, 0x4d, 0x00 }, b[] = { 0x89, 0x1c, 0x95, 0x20, 0x28, 0x4d, 0x00 },
-                      c[] = { 0x89, 0x04, 0x95, 0x20, 0x28, 0x4d, 0x00 }, d[] = { 0x66, 0x3d, 0x28, 0x00 }, e[] = { 0x66, 0x83, 0xf9, 0x28 };
-    if (memcmp((void *)0x401422, a, 5) || memcmp((void *)0x45fb8b, b, 7) || memcmp((void *)0x4651e4, c, 7) ||
-        memcmp((void *)0x45fb6f, d, 4) || memcmp((void *)0x4651cf, e, 4)) { logf_("lista de objetos: bytes inesperados, mantida em 40"); return; }
-    DWORD nv = (DWORD)g_objlist, o;
-    BYTE *p1 = (BYTE *)0x401423, *p2 = (BYTE *)0x45fb8e, *p3 = (BYTE *)0x4651e7;
-    VirtualProtect(p1, 4, PAGE_EXECUTE_READWRITE, &o); *(DWORD *)p1 = nv; VirtualProtect(p1, 4, o, &o);
-    VirtualProtect(p2, 4, PAGE_EXECUTE_READWRITE, &o); *(DWORD *)p2 = nv; VirtualProtect(p2, 4, o, &o);
-    VirtualProtect(p3, 4, PAGE_EXECUTE_READWRITE, &o); *(DWORD *)p3 = nv; VirtualProtect(p3, 4, o, &o);
-    objlist_cap(127);
-    g_objlist_on = 1;
-    logf_("lista de objetos: 40 -> 127");
-}
 static void install_object_hooks(void) {
-    install_objlist();
     g_kr = cfg.actor_dist * 256 / 100;
     // alcance: 0x45f36b  mov ecx,[esi] / cmp ecx,eax / jbe 0x45f381   (fora: 0x45f371)
     static const BYTE e1[] = { 0x8b, 0x0e, 0x3b, 0xc8, 0x76, 0x10 };
@@ -3772,18 +3744,11 @@ static void install_object_hooks(void) {
 
     // LOD dos modelos: 0x45f3f2 compara a distância (em [esi]) com byte[+0x121]*256 e byte[+0x122]*256 para trocar
     // para os modelos simplificados. A distância é dividida por lod_distance/100 logo antes (histerese incluída).
-    // Essa distância fica guardada no objeto e o resto do jogo também a usa: ela volta ao valor original no fim da
-    // escolha do LOD (0x45f562, onde todos os caminhos se juntam). Sem isso, o Piu-Piu sumia com lod_distance alto.
     g_klod = cfg.lod_dist * 256 / 100;
     static const BYTE l1[] = { 0x33, 0xc0, 0x8a, 0xa3, 0x21, 0x01, 0x00, 0x00 };   // xor eax,eax / mov ah,[ebx+0x121]
-    static const BYTE l2[] = { 0x8b, 0x54, 0x24, 0x18, 0x8b, 0xc2 };              // 0x45f562: mov edx,[esp+0x18] / mov eax,edx
     if (cfg.lod_dist == 100) logf_("LOD dos modelos: original");
-    else if (!memcmp((void *)0x45f3f2, l1, sizeof l1) && !memcmp((void *)0x45f562, l2, sizeof l2)) {
-        static volatile DWORD *lod_ptr; static volatile DWORD lod_saved;
+    else if (!memcmp((void *)0x45f3f2, l1, sizeof l1)) {
         BYTE *st = stub_mem(64), *p = st;
-        *p++ = 0x89; *p++ = 0x35; *(DWORD *)p = (DWORD)&lod_ptr; p += 4;   // mov [lod_ptr], esi
-        *p++ = 0x8b; *p++ = 0x06;                                          // mov eax, [esi]
-        *p++ = 0xa3; *(DWORD *)p = (DWORD)&lod_saved; p += 4;              // mov [lod_saved], eax
         *p++ = 0x51; *p++ = 0x52;                                          // push ecx / push edx
         *p++ = 0x8b; *p++ = 0x06;                                          // mov eax, [esi]
         *p++ = 0xb9; *(DWORD *)p = 0x100; p += 4;                          // mov ecx, 256
@@ -3794,22 +3759,6 @@ static void install_object_hooks(void) {
         memcpy(p, l1, sizeof l1); p += sizeof l1;                         // instruções originais
         p += put_jmp(p, (void *)0x45f3fa);
         write_site(0x45f3f2, l1, sizeof l1, st, "LOD dos modelos");
-        BYTE *s2 = stub_mem(64);                                           // fim da escolha: devolve a distância
-        p = s2;
-        *p++ = 0x50;                                                       // push eax
-        *p++ = 0xa1; *(DWORD *)p = (DWORD)&lod_ptr; p += 4;                // mov eax, [lod_ptr]
-        *p++ = 0x85; *p++ = 0xc0;                                          // test eax, eax
-        BYTE *jz = p; *p++ = 0x74; *p++ = 0;                               // jz fim
-        *p++ = 0x51;                                                       // push ecx
-        *p++ = 0x8b; *p++ = 0x0d; *(DWORD *)p = (DWORD)&lod_saved; p += 4; // mov ecx, [lod_saved]
-        *p++ = 0x89; *p++ = 0x08;                                          // mov [eax], ecx
-        *p++ = 0x59;                                                       // pop ecx
-        *p++ = 0xc7; *p++ = 0x05; *(DWORD *)p = (DWORD)&lod_ptr; p += 4; *(DWORD *)p = 0; p += 4;   // mov [lod_ptr], 0
-        jz[1] = (BYTE)(p - (jz + 2));
-        *p++ = 0x58;                                                       // pop eax
-        memcpy(p, l2, sizeof l2); p += sizeof l2;                          // instruções originais
-        p += put_jmp(p, (void *)0x45f568);
-        write_site(0x45f562, l2, sizeof l2, s2, "LOD dos modelos (devolve a distancia)");
         logf_("LOD dos modelos: %d%%", cfg.lod_dist);
     } else logf_("LOD dos modelos: bytes inesperados, desligado");
 }
@@ -4023,30 +3972,8 @@ static void install_pad_prompts(void) {
     logf_("dicas de botao: com controle conectado, as teclas viram botoes do Xbox (%s)", cfg.pad_prompts == 2 ? "icones" : "nomes");
 }
 
-static int g_objlist_cap = 127;
-static void objlist_stats(void) {             // debug: maior lista de objetos a cada 5 s e quantos quadros bateram no limite
-    static DWORD t0; static int mx, full, nl;
-    int n = *(volatile short *)0x4d2b6a;
-    if (n > mx) mx = n;
-    if (n >= g_objlist_cap) full++;
-    DWORD t = GetTickCount();
-    if (!t0) t0 = t;
-    if (t - t0 >= 5000) {
-        if (mx && nl < 200) { logf_("lista de objetos (5 s): maior %d, limite %d, quadros no limite %d", mx, g_objlist_cap, full); nl++; }
-        mx = full = 0; t0 = t;
-    }
-}
-// debug=1: F9 passa por alcance/LOD do mod e originais (4 combinações); F7 alterna o limite da lista de objetos
-// (127/40); F11 liga/desliga os efeitos de imagem
+// debug=1: F9 passa por alcance/LOD do mod e originais (4 combinações); F11 liga/desliga os efeitos de imagem
 static void debug_keys(void) {
-    static int prev7;
-    int d7 = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
-    if (d7 && !prev7 && g_objlist_on) {
-        g_objlist_cap = g_objlist_cap == 127 ? 40 : 127;
-        objlist_cap(g_objlist_cap);
-        logf_("F7: lista de objetos com limite %d%s", g_objlist_cap, g_objlist_cap == 40 ? " (ORIGINAL)" : "");
-    }
-    prev7 = d7;
     static int prev8;
     int d8 = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
     if (d8 && !prev8) { g_sim_pad = (g_sim_pad + 1) % 3; logf_("F8: controle %s", g_sim_pad == 1 ? "DESCONECTADO (simulado)" : g_sim_pad == 2 ? "CONECTADO (simulado)" : "real"); }
