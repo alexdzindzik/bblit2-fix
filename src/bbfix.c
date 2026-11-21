@@ -1860,14 +1860,17 @@ static LPARAM map_mouse(LPARAM lp) {
     if (gy < 0) gy = 0; if (gy >= g_gh) gy = g_gh - 1;
     return MAKELPARAM(gx, gy);
 }
-// cursor do mouse: some enquanto o controle navega pelos menus 2D e volta quando o mouse de verdade se move
+// cursor do mouse: some enquanto o controle navega pelos menus 2D e volta quando o mouse de verdade se move.
+// Vai pela imagem do cursor (SetCursor e WM_SETCURSOR), não pelo contador do ShowCursor, que o jogo também mexe.
 static PADCUR g_padcur;
 static void padcur_apply(int act) {
-    if (act == PADCUR_HIDE) ShowCursor(FALSE);
-    else if (act == PADCUR_SHOW) ShowCursor(TRUE);
+    if (act == PADCUR_HIDE) SetCursor(NULL);
+    else if (act == PADCUR_SHOW) SetCursor(LoadCursorA(NULL, (LPCSTR)IDC_ARROW));
+    if (act != PADCUR_KEEP) { static int nl; if (nl++ < 6) logf_("controle no menu: cursor do mouse %s", act == PADCUR_HIDE ? "escondido" : "de volta"); }
 }
 static LRESULT CALLBACK game_proc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
     if (m == WM_MOUSEMOVE && g_padcur.hidden) { POINT c; if (GetCursorPos(&c)) padcur_apply(padcur_mouse(&g_padcur, c.x, c.y)); }
+    if (m == WM_SETCURSOR && g_padcur.hidden && LOWORD(lp) == HTCLIENT) { SetCursor(NULL); return TRUE; }
     switch (m) {
     case WM_ACTIVATE:
         // o jogo "suspende" (destrói o OpenGL e recria a janela) ao perder o foco; com background=1 ele segue rodando
@@ -3770,6 +3773,20 @@ static void __cdecl op14_log(DWORD id, const BYTE *txt, DWORD pos) {
     logf_("op14: acao %02lx pos %lu esquema %d estado %lx | %s| %s", id & 0xff, pos & 0xffff, st ? st[0x95] : -1, st ? *(DWORD *)st : 0, as, hx);
     nl++;
 }
+// o que a op 0x14 deixou em 0x4d5fe0 (via 0 = nome da tecla com aspas/ícone, 1 = vazio com ícone do Enter)
+static void __cdecl op14_out(DWORD via) {
+    static DWORD seen[32]; static int nseen, nl;
+    const BYTE *o = (const BYTE *)0x4d5fe0;
+    DWORD h = 2166136261u ^ via;
+    for (int i = 0; i < 16; i++) h = (h ^ o[i]) * 16777619u;
+    if (nl >= 40) return;
+    for (int i = 0; i < nseen; i++) if (seen[i] == h) return;
+    if (nseen < 32) seen[nseen++] = h;
+    char hx[16 * 3 + 1]; int n = 0;
+    for (int i = 0; i < 16; i++) n += snprintf(hx + n, sizeof hx - n, "%02x ", o[i]);
+    logf_("op14: resultado via %lu tecla %02lx pad %d | %s", via, *(DWORD *)0x4d5f20, (int)g_pad_on, hx);
+    nl++;
+}
 static void install_op14_probe(void) {
     static const BYTE e[] = { 0x8b, 0xfa, 0x83, 0xff, 0x14 };   // mov edi, edx / cmp edi, 0x14
     if (memcmp((void *)0x4673c6, e, sizeof e)) { logf_("op14: bytes inesperados"); return; }
@@ -3782,6 +3799,23 @@ static void install_op14_probe(void) {
     memcpy(p, e, sizeof e); p += sizeof e;                                // instruções originais (a flag do cmp segue)
     p += put_jmp(p, (void *)0x4673cb);
     write_site(0x4673c6, e, sizeof e, st, "op14 (texto das dicas)");
+    static const BYTE e2[] = { 0xe9, 0x8e, 0x02, 0x00, 0x00 };          // 0x46769c: jmp 0x46792f (fim do nome da tecla)
+    static const BYTE e3[] = { 0xc6, 0x44, 0x24, 0x18, 0x01 };          // 0x4676a1: mov byte [esp+0x18], 1 (ícone do Enter)
+    if (!memcmp((void *)0x46769c, e2, 5) && !memcmp((void *)0x4676a1, e3, 5)) {
+        BYTE *s2 = stub_mem(64), *q = s2;
+        *q++ = 0x60; *q++ = 0x6a; *q++ = 0x00;                                    // pushad / push 0
+        *q++ = 0xe8; *(DWORD *)q = (DWORD)op14_out - (DWORD)(q + 4); q += 4;      // call op14_out
+        *q++ = 0x83; *q++ = 0xc4; *q++ = 0x04; *q++ = 0x61;                       // add esp, 4 / popad
+        put_jmp(q, (void *)0x46792f);
+        write_site(0x46769c, e2, 5, s2, "op14 (nome da tecla)");
+        BYTE *s3 = stub_mem(64); q = s3;
+        *q++ = 0x60; *q++ = 0x6a; *q++ = 0x01;                                    // pushad / push 1
+        *q++ = 0xe8; *(DWORD *)q = (DWORD)op14_out - (DWORD)(q + 4); q += 4;      // call op14_out
+        *q++ = 0x83; *q++ = 0xc4; *q++ = 0x04; *q++ = 0x61;                       // add esp, 4 / popad
+        memcpy(q, e3, 5); q += 5;
+        put_jmp(q, (void *)0x4676a6);
+        write_site(0x4676a1, e3, 5, s3, "op14 (icone do Enter)");
+    } else logf_("op14: bytes inesperados no fim");
 }
 static void install_pad_prompts(void) {
     if (!cfg.xinput || !cfg.pad_prompts) return;
