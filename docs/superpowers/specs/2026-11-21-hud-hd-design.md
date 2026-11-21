@@ -90,6 +90,14 @@ Opção `[hud] smooth_bars=1`.
 2. Como a largura da barra muda com a vida (geometria e coordenadas de textura).
 3. Se o traçado das silhuetas fica fiel o bastante; se não, comparar com o Real-ESRGAN e escolher por textura, com o Night vendo a folha de comparação.
 
+## Medição (Tarefa 1, 21/11, logs do Night e despejo F10 de um quadro)
+
+- **Caminho do desenho**: o HUD 2D é desenhado em `glOrtho` com `glBegin(GL_TRIANGLES)` e `glVertex3fv`, 2 triângulos (6 vértices) por sprite ou barra. Coordenadas de tela centradas: x de -960 a 960, y de -540 a 540; sprites em z -2, barras em z -1. Não há `glDrawArrays`, `glDrawElements` nem listas.
+- **Coordenadas de textura**: não vêm de `glTexCoord2f/2fv`, e sim de outra variante (contada pelo diagnóstico como "TexCoord(outra)"). Todos os sprites e barras usam a textura inteira com uma margem de 0,018 (`0.018..0.982` em s e t).
+- **Barras de vida**: a geometria muda, a textura não: o jogo encurta o retângulo (a textura do degradê é espremida). Barra cheia = 296,2 unidades; a do jogador da esquerda começa em x = -701,2 e cresce para a direita, a da direita termina em x = 806,2 e cresce para a esquerda. O jogo **já anima** a barra: 3,75 unidades por quadro, piscando durante a mudança. Por isso a animação do item 5 foi cancelada (ver o registro do plano): um rastro por cima duplicaria o efeito.
+- **Posições (tela 16:9)**: silhueta do Pernalonga (256×64) em -915..-394 × 342..612; do Taz (128×64) em 495..926 × 354..624; preenchimento das barras (128×8) com 42 unidades de altura.
+- **Atenção para a sombra**: perguntar o estado do GL (`glIsEnabled`) entre `glBegin` e `glEnd` não vale (devolve 0); o ponto de interceptação precisa guardar o estado antes do `glBegin`.
+
 ## Decisões deixadas para quem implementar
 
 Algoritmo exato do traçado (potrace ou próprio), parâmetros finos de sombra e animação dentro das faixas acima, organização do código novo em arquivo próprio (`src/hud.c`) ou dentro do `bbfix.c`.
