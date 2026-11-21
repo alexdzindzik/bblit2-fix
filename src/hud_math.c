@@ -2,6 +2,8 @@
 #include "hud_math.h"
 #include <stddef.h>
 #include <string.h>
+#include <stdlib.h>
+#include <math.h>
 
 // texturas do HUD da versão PT-BR (hash de desenho, igual em qualquer ajuste de "Brilho")
 static const struct { unsigned long long h; int kind; } k_hud[] = {
@@ -83,4 +85,36 @@ unsigned long long rgba_hash(const uint32_t *p, size_t n) {
     for (size_t i = 0; i < n; i++)
         for (int b = 0; b < 4; b++) { h ^= (p[i] >> 8 * b) & 0xff; h *= 1099511628211ULL; }
     return h;
+}
+
+static int gauss_kernel(float sigma, float *k, int kmax) {          // devolve o raio; k[0..2r]
+    if (sigma < 0.01f) { k[0] = 1; return 0; }
+    int r = (int)ceilf(3 * sigma); if (r > kmax) r = kmax;
+    float sum = 0;
+    for (int i = -r; i <= r; i++) { k[i + r] = expf(-(float)(i * i) / (2 * sigma * sigma)); sum += k[i + r]; }
+    for (int i = 0; i <= 2 * r; i++) k[i] /= sum;
+    return r;
+}
+
+void hud_shadow_mask(const unsigned char *alpha, int w, int h, int padx, int pady, float sx, float sy, unsigned char *out) {
+    int W = w + 2 * padx, H = h + 2 * pady;
+    float *a = calloc((size_t)W * H, sizeof *a), *b = calloc((size_t)W * H, sizeof *b);
+    float kx[129], ky[129];
+    if (!a || !b) { free(a); free(b); memset(out, 0, (size_t)W * H); return; }
+    for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) a[(size_t)(y + pady) * W + x + padx] = alpha[(size_t)y * w + x];
+    int rx = gauss_kernel(sx, kx, 64), ry = gauss_kernel(sy, ky, 64);
+    for (int y = 0; y < H; y++)                                         // horizontal: a -> b
+        for (int x = 0; x < W; x++) {
+            float v = 0;
+            for (int i = -rx; i <= rx; i++) { int xx = x + i; if (xx >= 0 && xx < W) v += a[(size_t)y * W + xx] * kx[i + rx]; }
+            b[(size_t)y * W + x] = v;
+        }
+    for (int y = 0; y < H; y++)                                         // vertical: b -> saída
+        for (int x = 0; x < W; x++) {
+            float v = 0;
+            for (int i = -ry; i <= ry; i++) { int yy = y + i; if (yy >= 0 && yy < H) v += b[(size_t)yy * W + x] * ky[i + ry]; }
+            int q = (int)(v + 0.5f);
+            out[(size_t)y * W + x] = (unsigned char)(v > 1e-6f && q < 1 ? 1 : q > 255 ? 255 : q);
+        }
+    free(a); free(b);
 }

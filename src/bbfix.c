@@ -24,8 +24,8 @@
 
 // ---------------------------------------------------------------- config / log
 static struct {
-    int enabled, log_gl, aspect, msaa, vsync, xinput, unlock_joy, a_enter, deadzone, cam_stick, swap_ab, language, game_res, background, debug, inv_stick, inv_trig, draw_dist, ssaa, mipmaps, aniso, actor_dist, auto_quality, lod_dist, force_gl, dump_tex, hd_tex, pad_prompts, menu_fill, hires_menu, menu_pad, menu_hd, hud_probe, center_menus, hud_hd;
-} cfg = { 1, 1, 2, 4, 1, 1, 0, 1, 30, 1, 0, -1, 1, 1, 0, 1, 1, 400, 2, 1, 16, 200, 1, 400, 1, 0, 1, 2, 1, 1, 1, 1, 0, 1, 1 };
+    int enabled, log_gl, aspect, msaa, vsync, xinput, unlock_joy, a_enter, deadzone, cam_stick, swap_ab, language, game_res, background, debug, inv_stick, inv_trig, draw_dist, ssaa, mipmaps, aniso, actor_dist, auto_quality, lod_dist, force_gl, dump_tex, hd_tex, pad_prompts, menu_fill, hires_menu, menu_pad, menu_hd, hud_probe, center_menus, hud_hd, hud_shadow;
+} cfg = { 1, 1, 2, 4, 1, 1, 0, 1, 30, 1, 0, -1, 1, 1, 0, 1, 1, 400, 2, 1, 16, 200, 1, 400, 1, 0, 1, 2, 1, 1, 1, 1, 0, 1, 1, 45 };
 // pós-processamento [postfx]: valores em %
 static struct { int on, bloom, threshold, sharpen, saturation, contrast, vignette; } fx = { 1, 25, 70, 40, 110, 105, 20 };
 
@@ -88,6 +88,9 @@ static void load_config(void) {
     cfg.menu_fill = ini_int("video", "menu_fill", 3);
     cfg.menu_hd = ini_int("video", "menu_hd", 1);
     cfg.hud_hd = ini_int("video", "hud_hd", 1);
+    cfg.hud_shadow = ini_int("hud", "shadow", 45);
+    if (cfg.hud_shadow < 0) cfg.hud_shadow = 0;
+    if (cfg.hud_shadow > 100) cfg.hud_shadow = 100;
     cfg.hires_menu = ini_int("video", "hires_menu", 1);
     cfg.pad_prompts = ini_int("pad", "button_prompts", 2);
     fx.on         = ini_int("postfx", "enabled", 1);
@@ -279,6 +282,8 @@ static PFN_wglGetProc r_wglGetProcAddress;
 static int n_vp, n_sc, n_or, n_fr, n_lm, n_rp, n_ct, n_dp;
 static GLenum g_mode = GL_MODELVIEW;
 static int pr_proj;                                  // diagnóstico do HUD: última projeção (1 glOrtho, 2 glFrustum, 3 glLoadMatrix)
+static float g_ortho_h = 1440; static int g_ortho_up = 1;   // altura e sentido do último glOrtho (sombra do HUD)
+static void sh_reset(void);
 static void pr_tick(void);
 static int g_scissor_on;
 static long g_frames;
@@ -297,6 +302,7 @@ static void APIENTRY h_Enable(GLenum c) { if (c == GL_SCISSOR_TEST) g_scissor_on
 static void APIENTRY h_Disable(GLenum c) { if (c == GL_SCISSOR_TEST) g_scissor_on = 0; r_Disable(c); }
 static void APIENTRY h_Ortho(GLdouble l, GLdouble r, GLdouble b, GLdouble t, GLdouble n, GLdouble f) {
     pr_proj = 1;
+    if (t != b) { g_ortho_h = (float)fabs(t - b); g_ortho_up = t > b; }
     LOGN(n_or, 30, "glOrtho(%g,%g,%g,%g,%g,%g) modo %04x", l, r, b, t, n, f, g_mode);
     r_Ortho(l, r, b, t, n, f);
 }
@@ -926,7 +932,7 @@ static int WINAPI h_DescribePF_wgl(HDC dc, int pf, UINT n, PIXELFORMATDESCRIPTOR
 typedef BOOL (WINAPI *PFN_wglDel)(HGLRC);
 static PFN_wglDel r_wglDeleteContext;
 static BOOL WINAPI h_wglDeleteContext(HGLRC rc) {
-    if (rc && rc == g_hd_rc) { hd_reset(); g_hd_rc = NULL; }   // nomes de textura valem por contexto
+    if (rc && rc == g_hd_rc) { hd_reset(); sh_reset(); g_hd_rc = NULL; }   // nomes de textura valem por contexto
     if (rc && rc == g_fbo_rc) {
         if (wglGetCurrentContext() == rc) fbo_free();
         g_fbo = g_res = 0; memset(g_rb, 0, sizeof g_rb);
@@ -1477,6 +1483,34 @@ static void upload_rgba(GLenum t, GLint ifmt, int W, int H, const DWORD *p) {
     glPixelStorei(GL_UNPACK_ALIGNMENT_, al); glPixelStorei(GL_UNPACK_ROW_LENGTH_, rl);
     glPixelStorei(GL_UNPACK_SKIP_ROWS_, sr); glPixelStorei(GL_UNPACK_SKIP_PIXELS_, sp);
 }
+// sombra do HUD ([hud] shadow): alfa de cada sprite do HUD guardado no envio (2x o original, tirado da versão
+// HD); a textura da sombra é feita no primeiro desenho, quando se sabe quantas unidades da tela cada texel ocupa
+typedef struct { GLuint name, tex; int w, h, padx, pady, bad; unsigned char *alpha; } SHADOW;
+static SHADOW g_sh[48]; static int g_sh_n; static unsigned g_sh_seq;
+static SHADOW *sh_find(GLuint name) { for (int i = 0; i < g_sh_n; i++) if (g_sh[i].name == name) return &g_sh[i]; return NULL; }
+static void sh_forget(GLuint name) {
+    SHADOW *e = sh_find(name);
+    if (!e) return;
+    if (e->tex) glDeleteTextures(1, &e->tex);
+    free(e->alpha);
+    *e = g_sh[--g_sh_n];
+}
+static void sh_reset(void) { for (int i = 0; i < g_sh_n; i++) free(g_sh[i].alpha); g_sh_n = 0; }   // contexto apagado: as texturas já foram junto
+// hd: versão 4x (W x H) que acabou de ir para a textura `name`
+static void sh_store(GLuint name, const DWORD *hd, int W, int H) {
+    if (!cfg.hud_shadow || W < 8 || H < 8) return;
+    sh_forget(name);
+    if (g_sh_n == (int)(sizeof g_sh / sizeof *g_sh)) return;
+    int w = W / 2, h = H / 2;
+    unsigned char *a = malloc((size_t)w * h);
+    if (!a) return;
+    for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+        const DWORD *p = hd + (size_t)(2 * y) * W + 2 * x;
+        a[(size_t)y * w + x] = (unsigned char)(((p[0] >> 24) + (p[1] >> 24) + (p[W] >> 24) + (p[W + 1] >> 24) + 2) / 4);
+    }
+    SHADOW *e = &g_sh[g_sh_n++];
+    memset(e, 0, sizeof *e); e->name = name; e->w = w; e->h = h; e->alpha = a;
+}
 // pacote HD do HUD (tools\hd_menu\make_pack.py): o mod exporta as texturas do HUD para bin\hd\hud\fonte e
 // carrega bin\hd\hud\<hash>.bmp (4x) no lugar do xBR. Só quando a pasta bin\hd existe.
 static int g_hud_dir;                           // bin\hd existe (visto ao ligar)
@@ -1575,6 +1609,7 @@ static int hd_replace(GLenum t, GLint ifmt, int w, int h, const DWORD *rgba, uns
         if (hd) {                                   // mesmo caminho do xBR: borda espalhada, envio 4x, marca HD
             tex_dilate(hd, W, H);
             upload_rgba(t, ifmt, W, H, hd);
+            if (hud_kind(hs) == HUD_SPRITE) sh_store(name, hd, W, H);
             free(hd);
             hd_mark(name, 1);
             return 1;
@@ -1586,6 +1621,7 @@ static int hd_replace(GLenum t, GLint ifmt, int w, int h, const DWORD *rgba, uns
     xbr4x(rgba, w, h, big);
     tex_dilate(big, W, H);
     upload_rgba(t, ifmt, W, H, big);
+    if (hud_kind(hs) == HUD_SPRITE) sh_store(name, big, W, H);
     free(big);
     hd_mark(name, 1);
     return 1;
@@ -1606,7 +1642,7 @@ static int tex_upload_hd(GLenum t, GLint ifmt, GLsizei w, GLsizei h, GLenum f, G
     if (g_hd_names_n || g_swap_n || tex_hooks_on()) {
         glGetIntegerv(GL_TEXTURE_BINDING_2D, &name);
         g_dbg_name = name;
-        hd_mark((GLuint)name, 0); swap_forget((GLuint)name); hud_mark_tex((GLuint)name, HUD_NONE);
+        hd_mark((GLuint)name, 0); swap_forget((GLuint)name); hud_mark_tex((GLuint)name, HUD_NONE); sh_forget((GLuint)name);
     }
     if (!px || w <= 0 || h <= 0 || w > 1024 || h > 1024) return 0;
     if (!tex_hooks_on()) return 0;
@@ -1668,7 +1704,7 @@ static int tex_sub_hd(GLenum t, GLint x, GLint y, GLsizei w, GLsizei h, GLenum f
             if (cfg.dump_tex) tex_dump(hs, w, h, f, ty, 0, rgba);
             GLint ifmt = 0; glGetTexLevelParameteriv(t, 0, GL_TEXTURE_INTERNAL_FORMAT, &ifmt);
             if (ifmt < 5) ifmt = GL_RGBA;           // 1-4 = componentes; usa o formato genérico
-            hd_mark((GLuint)name, 0); swap_forget((GLuint)name); hud_mark_tex((GLuint)name, hud_kind(hs));
+            hd_mark((GLuint)name, 0); swap_forget((GLuint)name); hud_mark_tex((GLuint)name, hud_kind(hs)); sh_forget((GLuint)name);
             ok = hd_replace(t, ifmt, w, h, rgba, hs, (GLuint)name);
             if (!ok && is_hd) {                     // conteúdo comum numa textura que estava em HD: volta ao 1x
                 r_TexImage2D(t, 0, ifmt, w, h, 0, f, ty, px);
@@ -1688,9 +1724,9 @@ static void hd_forget_bound(void) {
 typedef void (APIENTRY *PFN_DelTex)(GLsizei, const GLuint *);
 static PFN_DelTex r_DeleteTextures;
 static void APIENTRY h_DeleteTextures(GLsizei n, const GLuint *t) {
-    if (t && (g_hd_names_n || g_swap_n)) {
+    if (t && (g_hd_names_n || g_swap_n || g_sh_n)) {
         int was = 0;
-        for (GLsizei i = 0; i < n; i++) { was += hd_is(t[i]); hd_mark(t[i], 0); swap_forget(t[i]); }
+        for (GLsizei i = 0; i < n; i++) { was += hd_is(t[i]); hd_mark(t[i], 0); swap_forget(t[i]); sh_forget(t[i]); }
         static int nl; if (cfg.debug && was && nl++ < 20) logf_("glDeleteTextures: %d texturas (%d estavam em HD)", (int)n, was);
     }
     r_DeleteTextures(n, t);
@@ -1802,8 +1838,122 @@ static void pr_fetch(int idx, float *v, float *tc) {
         tc[0] = ((const float *)b)[0]; if (pr_tp.size > 1) tc[1] = ((const float *)b)[1];
     }
 }
+// sombra do HUD: o glBegin..glEnd de um sprite do HUD em glOrtho fica guardado em vez de ir ao OpenGL; no glEnd a
+// sombra é desenhada e o desenho do jogo vai igual (mesmos vértices, coordenadas e cores, na mesma ordem). Fora do
+// glBegin real dá para ler e salvar o estado do OpenGL (dentro dele glGet/glIsEnabled não valem).
+typedef struct { float x, y, s, t; } hud_vert;
+typedef struct { float x, y, z, s, t, c[4]; } SH_VERT;
+static SH_VERT sh_v[48]; static int sh_n, sh_cap; static GLenum sh_mode; static float sh_tc[2], sh_cc[4];
+static GLuint sh_tex;
+static int sh_wants(GLenum m) {
+    if (!cfg.hud_shadow || pr_kind != HUD_SPRITE || pr_proj != 1 || (m != GL_TRIANGLES && m != GL_QUADS)) return 0;
+    SHADOW *e = sh_find(pr_tex);
+    return e && !e->bad;
+}
+static void sh_replay(void) {
+    glBegin(sh_mode);
+    for (int i = 0; i < sh_n; i++) { glColor4fv(sh_v[i].c); glTexCoord2f(sh_v[i].s, sh_v[i].t); glVertex3f(sh_v[i].x, sh_v[i].y, sh_v[i].z); }
+    glColor4fv(sh_cc); glTexCoord2f(sh_tc[0], sh_tc[1]);   // estado corrente igual ao que o jogo deixou
+}
+// 1 = vértice guardado; cheio: o que já veio vai ao OpenGL e o resto passa direto (sem sombra neste desenho)
+static int sh_vtx(float x, float y, float z) {
+    if (!sh_cap) return 0;
+    if (sh_n == (int)(sizeof sh_v / sizeof *sh_v)) { sh_replay(); sh_cap = 0; return 0; }
+    SH_VERT *v = &sh_v[sh_n++];
+    v->x = x; v->y = y; v->z = z; v->s = sh_tc[0]; v->t = sh_tc[1]; memcpy(v->c, sh_cc, sizeof v->c);
+    return 1;
+}
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
+// textura da sombra de um sprite, feita no primeiro desenho: desfoque de 0,4% da altura da tela, em texels por eixo
+static int sh_make(SHADOW *e, const hud_vert v[4]) {
+    float ux = fabsf(v[1].x - v[0].x) / (fabsf(v[1].s - v[0].s) * e->w), uy = fabsf(v[3].y - v[0].y) / (fabsf(v[3].t - v[0].t) * e->h);
+    if (!(ux > 0.01f) || !(uy > 0.01f)) { e->bad = 1; return 0; }
+    float sig = 0.004f * g_ortho_h, sx = sig / ux, sy = sig / uy;
+    if (sx > 20) sx = 20; if (sy > 20) sy = 20;
+    e->padx = (int)ceilf(3 * sx) + 1; e->pady = (int)ceilf(3 * sy) + 1;
+    int W = e->w + 2 * e->padx, H = e->h + 2 * e->pady;
+    unsigned char *m = malloc((size_t)W * H);
+    if (!m) { e->bad = 1; return 0; }
+    hud_shadow_mask(e->alpha, e->w, e->h, e->padx, e->pady, sx, sy, m);
+    e->tex = 0x7B1B0200 + (g_sh_seq++ & 0xfff);
+    GLint prev = 0, al = 4, rl = 0, sr = 0, sp = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev);
+    glGetIntegerv(GL_UNPACK_ALIGNMENT_, &al); glGetIntegerv(GL_UNPACK_ROW_LENGTH_, &rl);
+    glGetIntegerv(GL_UNPACK_SKIP_ROWS_, &sr); glGetIntegerv(GL_UNPACK_SKIP_PIXELS_, &sp);
+    glPixelStorei(GL_UNPACK_ALIGNMENT_, 1); glPixelStorei(GL_UNPACK_ROW_LENGTH_, 0);
+    glPixelStorei(GL_UNPACK_SKIP_ROWS_, 0); glPixelStorei(GL_UNPACK_SKIP_PIXELS_, 0);
+    glBindTexture(GL_TEXTURE_2D, e->tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA, W, H, 0, GL_ALPHA, GL_UNSIGNED_BYTE, m);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)prev);
+    glPixelStorei(GL_UNPACK_ALIGNMENT_, al); glPixelStorei(GL_UNPACK_ROW_LENGTH_, rl);
+    glPixelStorei(GL_UNPACK_SKIP_ROWS_, sr); glPixelStorei(GL_UNPACK_SKIP_PIXELS_, sp);
+    free(m); free(e->alpha); e->alpha = NULL;
+    static int nl; if (nl++ < 40) logf_("sombra do HUD: textura %u (%dx%d) desfoque %.1f x %.1f texels", e->name, e->w / 2, e->h / 2, sx / 2, sy / 2);
+    return 1;
+}
+// v: cantos do sprite (0 = s0,t0; 1 = s1,t0; 2 = s1,t1; 3 = s0,t1), alinhados aos eixos. Desenha a sombra antes dele.
+static void hud_on_quad(GLuint tex, const hud_vert v[4], float z, float alpha) {
+    SHADOW *e = sh_find(tex);
+    if (!e || e->bad || (!e->tex && !sh_make(e, v))) return;
+    float ax = (v[1].x - v[0].x) / (v[1].s - v[0].s), ay = (v[3].y - v[0].y) / (v[3].t - v[0].t);
+    float ps = (float)e->padx / e->w, pt = (float)e->pady / e->h;
+    float off = 0.0015f * g_ortho_h, dx = off, dy = g_ortho_up ? -off : off;      // para baixo e para a direita
+    float xa = v[0].x + ax * (-ps - v[0].s) + dx, xb = v[0].x + ax * (1 + ps - v[0].s) + dx;
+    float ya = v[0].y + ay * (-pt - v[0].t) + dy, yb = v[0].y + ay * (1 + pt - v[0].t) + dy;
+    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_TEXTURE_BIT | GL_CURRENT_BIT);
+    glDisable(GL_ALPHA_TEST); glDisable(GL_DEPTH_TEST); glDisable(GL_LIGHTING); glDisable(GL_FOG);
+    glDisable(GL_CULL_FACE); glDisable(GL_STENCIL_TEST);
+    glDepthMask(GL_FALSE);
+    glEnable(GL_TEXTURE_2D); glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glBindTexture(GL_TEXTURE_2D, e->tex); glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    glColor4f(0, 0, 0, cfg.hud_shadow / 100.f * alpha);
+    glBegin(GL_QUADS);
+    glTexCoord2f(0, 0); glVertex3f(xa, ya, z);
+    glTexCoord2f(1, 0); glVertex3f(xb, ya, z);
+    glTexCoord2f(1, 1); glVertex3f(xb, yb, z);
+    glTexCoord2f(0, 1); glVertex3f(xa, yb, z);
+    glEnd();
+    glPopAttrib();
+}
+// cada quadrilátero do desenho guardado (6 vértices em triângulos ou 4 em quads): só os retângulos alinhados
+static void sh_batch(void) {
+    int k = sh_mode == GL_QUADS ? 4 : 6;
+    for (int g = 0; g + k <= sh_n; g += k) {
+        const SH_VERT *q = &sh_v[g];
+        int i0 = 0, i1 = 0, j0 = 0, j1 = 0;
+        for (int i = 1; i < k; i++) {
+            if (q[i].s < q[i0].s) i0 = i; if (q[i].s > q[i1].s) i1 = i;
+            if (q[i].t < q[j0].t) j0 = i; if (q[i].t > q[j1].t) j1 = i;
+        }
+        float s0 = q[i0].s, s1 = q[i1].s, t0 = q[j0].t, t1 = q[j1].t;
+        if (s1 - s0 < 1e-4f || t1 - t0 < 1e-4f) continue;
+        float ax = (q[i1].x - q[i0].x) / (s1 - s0), ay = (q[j1].y - q[j0].y) / (t1 - t0);
+        int ok = 1;
+        for (int i = 0; i < k && ok; i++)
+            ok = fabsf(q[i].x - (q[i0].x + ax * (q[i].s - s0))) < 1 && fabsf(q[i].y - (q[j0].y + ay * (q[i].t - t0))) < 1;
+        if (!ok) continue;
+        float x0 = q[i0].x - ax * s0, y0 = q[j0].y - ay * t0;   // posição em s = 0 / t = 0
+        hud_vert v[4] = { { x0 + ax * s0, y0 + ay * t0, s0, t0 }, { x0 + ax * s1, y0 + ay * t0, s1, t0 },
+                          { x0 + ax * s1, y0 + ay * t1, s1, t1 }, { x0 + ax * s0, y0 + ay * t1, s0, t1 } };
+        hud_on_quad(sh_tex, v, q[0].z, q[0].c[3]);
+    }
+}
 static void APIENTRY h_BindTexture(GLenum t, GLuint n) { if (t == GL_TEXTURE_2D) { pr_tex = n; pr_kind = hud_tex_kind(n); } r_BindTexture(t, n); }
-static void APIENTRY h_Begin(GLenum m) { pr_count(PR_BEGIN); pr_in = 1; pr_mode = (int)m; pr_nv = 0; r_Begin(m); }
+static void APIENTRY h_Begin(GLenum m) {
+    pr_count(PR_BEGIN); pr_in = 1; pr_mode = (int)m; pr_nv = 0;
+    if (sh_wants(m)) {                              // guarda em vez de começar: a sombra vai antes
+        float t4[4] = { 0, 0, 0, 1 };
+        glGetFloatv(GL_CURRENT_TEXTURE_COORDS, t4); sh_tc[0] = t4[0]; sh_tc[1] = t4[1];
+        glGetFloatv(GL_CURRENT_COLOR, sh_cc);
+        sh_cap = 1; sh_mode = m; sh_n = 0; sh_tex = pr_tex;
+        return;
+    }
+    r_Begin(m);
+}
 static void pr_dump_batch(void) {
     static int nl;
     if (pr_nv < 1 || fabsf(pr_v[0][2]) >= 50 || nl >= 3000) return;
@@ -1822,7 +1972,14 @@ static void pr_dump_batch(void) {
 }
 static void APIENTRY h_End(void) {
     if (pr_in && pr_frame_dump == 2) pr_dump_batch();
-    if (pr_in && pr_kind && pr_nv) pr_log_draw("Begin/End", pr_mode, pr_nv, (const float (*)[4])pr_v, (const float (*)[2])pr_tc);
+    if (sh_cap) {                                   // sombra, depois o desenho do jogo como veio
+        sh_cap = 0;
+        sh_batch();
+        sh_replay(); glEnd();
+        pr_in = 0;
+        return;
+    }
+    if (pr_in && pr_kind && pr_nv && cfg.hud_probe) pr_log_draw("Begin/End", pr_mode, pr_nv, (const float (*)[4])pr_v, (const float (*)[2])pr_tc);
     pr_in = 0; r_End();
 }
 static void (APIENTRY *r_TexCoord2d)(GLdouble, GLdouble);
@@ -1839,38 +1996,43 @@ static void (APIENTRY *r_Color4f)(GLfloat, GLfloat, GLfloat, GLfloat);
 static void (APIENTRY *r_Color4fv)(const GLfloat *);
 static void (APIENTRY *r_Color3f)(GLfloat, GLfloat, GLfloat);
 static void (APIENTRY *r_Color3ub)(GLubyte, GLubyte, GLubyte);
-static void pr_tcx(float s0, float t0) { pr_count(PR_TCX); pr_cur_tc[0] = s0; pr_cur_tc[1] = t0; }
-static void pr_color(float r, float g, float b, float a) { pr_count(PR_COLOR); pr_col[0] = r; pr_col[1] = g; pr_col[2] = b; pr_col[3] = a; }
-static void APIENTRY h_TexCoord2d(GLdouble a, GLdouble b) { pr_tcx((float)a, (float)b); r_TexCoord2d(a, b); }
-static void APIENTRY h_TexCoord2dv(const GLdouble *p) { pr_tcx((float)p[0], (float)p[1]); r_TexCoord2dv(p); }
-static void APIENTRY h_TexCoord2i(GLint a, GLint b) { pr_tcx((float)a, (float)b); r_TexCoord2i(a, b); }
-static void APIENTRY h_TexCoord2s(GLshort a, GLshort b) { pr_tcx(a, b); r_TexCoord2s(a, b); }
-static void APIENTRY h_TexCoord3f(GLfloat a, GLfloat b, GLfloat c) { pr_tcx(a, b); r_TexCoord3f(a, b, c); }
-static void APIENTRY h_TexCoord3fv(const GLfloat *p) { pr_tcx(p[0], p[1]); r_TexCoord3fv(p); }
-static void APIENTRY h_TexCoord4f(GLfloat a, GLfloat b, GLfloat c, GLfloat d) { pr_tcx(d != 0 ? a / d : a, d != 0 ? b / d : b); r_TexCoord4f(a, b, c, d); }
-static void APIENTRY h_TexCoord4fv(const GLfloat *p) { pr_tcx(p[3] != 0 ? p[0] / p[3] : p[0], p[3] != 0 ? p[1] / p[3] : p[1]); r_TexCoord4fv(p); }
-static void APIENTRY h_Color4ub(GLubyte r, GLubyte g, GLubyte b, GLubyte a) { pr_color(r / 255.f, g / 255.f, b / 255.f, a / 255.f); r_Color4ub(r, g, b, a); }
-static void APIENTRY h_Color4ubv(const GLubyte *p) { pr_color(p[0] / 255.f, p[1] / 255.f, p[2] / 255.f, p[3] / 255.f); r_Color4ubv(p); }
-static void APIENTRY h_Color4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a) { pr_color(r, g, b, a); r_Color4f(r, g, b, a); }
-static void APIENTRY h_Color4fv(const GLfloat *p) { pr_color(p[0], p[1], p[2], p[3]); r_Color4fv(p); }
-static void APIENTRY h_Color3f(GLfloat r, GLfloat g, GLfloat b) { pr_color(r, g, b, 1); r_Color3f(r, g, b); }
-static void APIENTRY h_Color3ub(GLubyte r, GLubyte g, GLubyte b) { pr_color(r / 255.f, g / 255.f, b / 255.f, 1); r_Color3ub(r, g, b); }
-static void APIENTRY h_Vertex2f(GLfloat x, GLfloat y) { pr_count(PR_V2F); pr_vert(x, y, 0, 1); r_Vertex2f(x, y); }
-static void APIENTRY h_Vertex2fv(const GLfloat *p) { pr_count(PR_V2FV); pr_vert(p[0], p[1], 0, 1); r_Vertex2fv(p); }
-static void APIENTRY h_Vertex2i(GLint x, GLint y) { pr_count(PR_V2I); pr_vert((float)x, (float)y, 0, 1); r_Vertex2i(x, y); }
-static void APIENTRY h_Vertex2s(GLshort x, GLshort y) { pr_count(PR_V2S); pr_vert(x, y, 0, 1); r_Vertex2s(x, y); }
-static void APIENTRY h_Vertex3f(GLfloat x, GLfloat y, GLfloat z) { pr_count(PR_V3F); pr_vert(x, y, z, 1); r_Vertex3f(x, y, z); }
-static void APIENTRY h_Vertex3fv(const GLfloat *p) { pr_count(PR_V3FV); pr_vert(p[0], p[1], p[2], 1); r_Vertex3fv(p); }
-static void APIENTRY h_Vertex3i(GLint x, GLint y, GLint z) { pr_count(PR_V3I); pr_vert((float)x, (float)y, (float)z, 1); r_Vertex3i(x, y, z); }
-static void APIENTRY h_Vertex4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w) { pr_count(PR_V4F); pr_vert(x, y, z, w); r_Vertex4f(x, y, z, w); }
-static void APIENTRY h_Vertex4fv(const GLfloat *p) { pr_count(PR_V4FV); pr_vert(p[0], p[1], p[2], p[3]); r_Vertex4fv(p); }
-static void APIENTRY h_TexCoord2f(GLfloat s0, GLfloat t0) { pr_count(PR_TC2F); pr_cur_tc[0] = s0; pr_cur_tc[1] = t0; r_TexCoord2f(s0, t0); }
-static void APIENTRY h_TexCoord2fv(const GLfloat *p) { pr_count(PR_TC2FV); pr_cur_tc[0] = p[0]; pr_cur_tc[1] = p[1]; r_TexCoord2fv(p); }
+// devolvem 1 quando o desenho está sendo guardado para a sombra (o valor fica para a repetição)
+static int pr_tcx(float s0, float t0) { pr_count(PR_TCX); pr_cur_tc[0] = s0; pr_cur_tc[1] = t0; if (!sh_cap) return 0; sh_tc[0] = s0; sh_tc[1] = t0; return 1; }
+static int pr_color(float r, float g, float b, float a) {
+    pr_count(PR_COLOR); pr_col[0] = r; pr_col[1] = g; pr_col[2] = b; pr_col[3] = a;
+    if (!sh_cap) return 0;
+    sh_cc[0] = r; sh_cc[1] = g; sh_cc[2] = b; sh_cc[3] = a; return 1;
+}
+static void APIENTRY h_TexCoord2d(GLdouble a, GLdouble b) { if (!pr_tcx((float)a, (float)b)) r_TexCoord2d(a, b); }
+static void APIENTRY h_TexCoord2dv(const GLdouble *p) { if (!pr_tcx((float)p[0], (float)p[1])) r_TexCoord2dv(p); }
+static void APIENTRY h_TexCoord2i(GLint a, GLint b) { if (!pr_tcx((float)a, (float)b)) r_TexCoord2i(a, b); }
+static void APIENTRY h_TexCoord2s(GLshort a, GLshort b) { if (!pr_tcx(a, b)) r_TexCoord2s(a, b); }
+static void APIENTRY h_TexCoord3f(GLfloat a, GLfloat b, GLfloat c) { if (!pr_tcx(a, b)) r_TexCoord3f(a, b, c); }
+static void APIENTRY h_TexCoord3fv(const GLfloat *p) { if (!pr_tcx(p[0], p[1])) r_TexCoord3fv(p); }
+static void APIENTRY h_TexCoord4f(GLfloat a, GLfloat b, GLfloat c, GLfloat d) { if (!pr_tcx(d != 0 ? a / d : a, d != 0 ? b / d : b)) r_TexCoord4f(a, b, c, d); }
+static void APIENTRY h_TexCoord4fv(const GLfloat *p) { if (!pr_tcx(p[3] != 0 ? p[0] / p[3] : p[0], p[3] != 0 ? p[1] / p[3] : p[1])) r_TexCoord4fv(p); }
+static void APIENTRY h_Color4ub(GLubyte r, GLubyte g, GLubyte b, GLubyte a) { if (!pr_color(r / 255.f, g / 255.f, b / 255.f, a / 255.f)) r_Color4ub(r, g, b, a); }
+static void APIENTRY h_Color4ubv(const GLubyte *p) { if (!pr_color(p[0] / 255.f, p[1] / 255.f, p[2] / 255.f, p[3] / 255.f)) r_Color4ubv(p); }
+static void APIENTRY h_Color4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a) { if (!pr_color(r, g, b, a)) r_Color4f(r, g, b, a); }
+static void APIENTRY h_Color4fv(const GLfloat *p) { if (!pr_color(p[0], p[1], p[2], p[3])) r_Color4fv(p); }
+static void APIENTRY h_Color3f(GLfloat r, GLfloat g, GLfloat b) { if (!pr_color(r, g, b, 1)) r_Color3f(r, g, b); }
+static void APIENTRY h_Color3ub(GLubyte r, GLubyte g, GLubyte b) { if (!pr_color(r / 255.f, g / 255.f, b / 255.f, 1)) r_Color3ub(r, g, b); }
+static void APIENTRY h_Vertex2f(GLfloat x, GLfloat y) { pr_count(PR_V2F); pr_vert(x, y, 0, 1); if (!sh_vtx(x, y, 0)) r_Vertex2f(x, y); }
+static void APIENTRY h_Vertex2fv(const GLfloat *p) { pr_count(PR_V2FV); pr_vert(p[0], p[1], 0, 1); if (!sh_vtx(p[0], p[1], 0)) r_Vertex2fv(p); }
+static void APIENTRY h_Vertex2i(GLint x, GLint y) { pr_count(PR_V2I); pr_vert((float)x, (float)y, 0, 1); if (!sh_vtx((float)x, (float)y, 0)) r_Vertex2i(x, y); }
+static void APIENTRY h_Vertex2s(GLshort x, GLshort y) { pr_count(PR_V2S); pr_vert(x, y, 0, 1); if (!sh_vtx(x, y, 0)) r_Vertex2s(x, y); }
+static void APIENTRY h_Vertex3f(GLfloat x, GLfloat y, GLfloat z) { pr_count(PR_V3F); pr_vert(x, y, z, 1); if (!sh_vtx(x, y, z)) r_Vertex3f(x, y, z); }
+static void APIENTRY h_Vertex3fv(const GLfloat *p) { pr_count(PR_V3FV); pr_vert(p[0], p[1], p[2], 1); if (!sh_vtx(p[0], p[1], p[2])) r_Vertex3fv(p); }
+static void APIENTRY h_Vertex3i(GLint x, GLint y, GLint z) { pr_count(PR_V3I); pr_vert((float)x, (float)y, (float)z, 1); if (!sh_vtx((float)x, (float)y, (float)z)) r_Vertex3i(x, y, z); }
+static void APIENTRY h_Vertex4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w) { pr_count(PR_V4F); pr_vert(x, y, z, w); if (!sh_vtx(x, y, z)) r_Vertex4f(x, y, z, w); }
+static void APIENTRY h_Vertex4fv(const GLfloat *p) { pr_count(PR_V4FV); pr_vert(p[0], p[1], p[2], p[3]); if (!sh_vtx(p[0], p[1], p[2])) r_Vertex4fv(p); }
+static void APIENTRY h_TexCoord2f(GLfloat s0, GLfloat t0) { pr_count(PR_TC2F); pr_cur_tc[0] = s0; pr_cur_tc[1] = t0; if (sh_cap) { sh_tc[0] = s0; sh_tc[1] = t0; return; } r_TexCoord2f(s0, t0); }
+static void APIENTRY h_TexCoord2fv(const GLfloat *p) { pr_count(PR_TC2FV); pr_cur_tc[0] = p[0]; pr_cur_tc[1] = p[1]; if (sh_cap) { sh_tc[0] = p[0]; sh_tc[1] = p[1]; return; } r_TexCoord2fv(p); }
 static void APIENTRY h_VertexPointer(GLint n, GLenum t, GLsizei st, const void *p) { pr_vp.size = n; pr_vp.type = t; pr_vp.stride = st; pr_vp.ptr = p; r_VertexPointer(n, t, st, p); }
 static void APIENTRY h_TexCoordPointer(GLint n, GLenum t, GLsizei st, const void *p) { pr_tp.size = n; pr_tp.type = t; pr_tp.stride = st; pr_tp.ptr = p; r_TexCoordPointer(n, t, st, p); }
 static void APIENTRY h_DrawArrays(GLenum m, GLint first, GLsizei n) {
     pr_count(PR_DRAWARRAYS);
-    if (pr_kind && n > 0) {
+    if (pr_kind && n > 0 && cfg.hud_probe) {
         float v[8][4], tc[8][2]; int k = n < 8 ? n : 8;
         for (int i = 0; i < k; i++) pr_fetch(first + i, v[i], tc[i]);
         pr_log_draw("DrawArrays", (int)m, k, (const float (*)[4])v, (const float (*)[2])tc);
@@ -1879,7 +2041,7 @@ static void APIENTRY h_DrawArrays(GLenum m, GLint first, GLsizei n) {
 }
 static void APIENTRY h_DrawElements(GLenum m, GLsizei n, GLenum t, const void *ix) {
     pr_count(PR_DRAWELEMENTS);
-    if (pr_kind && n > 0 && ix) {
+    if (pr_kind && n > 0 && ix && cfg.hud_probe) {
         float v[8][4], tc[8][2]; int k = n < 8 ? n : 8;
         for (int i = 0; i < k; i++) {
             unsigned id = t == GL_UNSIGNED_SHORT ? ((const unsigned short *)ix)[i] : t == GL_UNSIGNED_BYTE ? ((const unsigned char *)ix)[i] : ((const unsigned *)ix)[i];
@@ -1893,7 +2055,7 @@ static void APIENTRY h_CallList(GLuint l) { pr_count(PR_CALLLIST); r_CallList(l)
 static void APIENTRY h_CallLists(GLsizei n, GLenum t, const void *p) { pr_count(PR_CALLLISTS); r_CallLists(n, t, p); }
 static void APIENTRY h_Rectf(GLfloat a, GLfloat b, GLfloat c, GLfloat d) {
     pr_count(PR_RECTF);
-    if (pr_kind) { float v[2][4] = { { a, b, 0, 1 }, { c, d, 0, 1 } }, tc[2][2] = { { 0, 0 }, { 0, 0 } }; pr_log_draw("Rectf", 0, 2, (const float (*)[4])v, (const float (*)[2])tc); }
+    if (pr_kind && cfg.hud_probe) { float v[2][4] = { { a, b, 0, 1 }, { c, d, 0, 1 } }, tc[2][2] = { { 0, 0 }, { 0, 0 } }; pr_log_draw("Rectf", 0, 2, (const float (*)[4])v, (const float (*)[2])tc); }
     r_Rectf(a, b, c, d);
 }
 static void APIENTRY h_Recti(GLint a, GLint b, GLint c, GLint d) { pr_count(PR_RECTI); r_Recti(a, b, c, d); }
@@ -1949,7 +2111,7 @@ static FARPROC WINAPI h_GetProcAddress(HMODULE m, LPCSTR name) {
     if (name[0] == 'g' && name[1] == 'l' && name[2] != 'u') {
         for (size_t i = 0; i < sizeof gl_hooks / sizeof *gl_hooks; i++)
             if (!strcmp(name + 2, gl_hooks[i].name)) { *gl_hooks[i].real = (void *)p; return (FARPROC)gl_hooks[i].hook; }
-        if (cfg.hud_probe)
+        if (cfg.hud_probe || cfg.hud_shadow)
             for (size_t i = 0; i < sizeof gl_probe_hooks / sizeof *gl_probe_hooks; i++)
                 if (!strcmp(name + 2, gl_probe_hooks[i].name)) { *gl_probe_hooks[i].real = (void *)p; return (FARPROC)gl_probe_hooks[i].hook; }
     }

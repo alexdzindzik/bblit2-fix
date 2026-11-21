@@ -16,4 +16,8 @@ int bmp32_parse(const unsigned char *buf, size_t n, int *w, int *h, uint32_t *ou
 size_t bmp32_build(const uint32_t *rgba, int w, int h, unsigned char *out);   // bytes; out NULL = só o tamanho
 unsigned long long rgba_hash(const uint32_t *p, size_t n);                    // FNV-1a 64 do RGBA exato
 
+// sombra: alfa (w x h) desfocado (gaussiano separável, sigma por eixo, raio ceil(3*sigma)) numa saída com margem
+// (w+2*padx) x (h+2*pady). Valor > 0 nunca arredonda para 0 (a borda da sombra não some).
+void hud_shadow_mask(const unsigned char *alpha, int w, int h, int padx, int pady, float sx, float sy, unsigned char *out);
+
 #endif

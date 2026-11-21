@@ -63,12 +63,53 @@ static void test_rgba_hash_differs(void) {
     CHECK(rgba_hash(a, 64) != rgba_hash(b, 64));
 }
 
+static void test_shadow_size_and_zero(void) {
+    unsigned char al[8 * 4] = { 0 }, out[14 * 8 + 4];
+    memset(out, 0x5a, sizeof out);
+    hud_shadow_mask(al, 8, 4, 3, 2, 1.5f, 1.0f, out);
+    int nz = 0; for (int i = 0; i < 14 * 8; i++) nz += out[i] != 0;
+    CHECK(nz == 0);
+    CHECK(out[14 * 8] == 0x5a && out[14 * 8 + 3] == 0x5a);          // não passa do tamanho com margem
+}
+
+static void test_shadow_spreads(void) {
+    unsigned char al[1] = { 255 }, out[21 * 21];
+    hud_shadow_mask(al, 1, 1, 10, 10, 2.0f, 2.0f, out);              // sigma 2: até 3σ = 6 há sombra, além de 4σ = 8 não
+    #define O(x, y) out[(y) * 21 + (x)]
+    CHECK(O(10, 10) > 0);
+    CHECK(O(16, 10) > 0 && O(4, 10) > 0 && O(10, 16) > 0 && O(10, 4) > 0);
+    CHECK(O(14, 14) > 0);                                              // diagonal a 5,7
+    CHECK(O(19, 10) == 0 && O(10, 1) == 0 && O(0, 0) == 0 && O(20, 20) == 0);
+    #undef O
+}
+
+static void test_shadow_sum(void) {
+    enum { W = 10, P = 8, S = W + 2 * P };
+    unsigned char al[W * W], out[S * S];
+    memset(al, 255, sizeof al);
+    hud_shadow_mask(al, W, W, P, P, 2.0f, 2.0f, out);
+    long sum = 0; for (int i = 0; i < S * S; i++) sum += out[i];
+    long want = 255L * W * W;
+    CHECK(sum >= want * 98 / 100 && sum <= want * 102 / 100);
+}
+
+static void test_shadow_aniso(void) {
+    unsigned char al[1] = { 255 }, out[21 * 21];
+    hud_shadow_mask(al, 1, 1, 10, 10, 3.0f, 1.0f, out);              // textura esticada: mais desfoque em x
+    CHECK(out[10 * 21 + 18] > 0);                                      // 8 texels em x (< 3σx = 9)
+    CHECK(out[18 * 21 + 10] == 0);                                     // 8 texels em y (> 4σy = 4)
+}
+
 int main(void) {
     test_hud_kind();
     test_bmp_roundtrip();
     test_bmp_truncated();
     test_bmp_wrong_bpp();
     test_rgba_hash_differs();
+    test_shadow_size_and_zero();
+    test_shadow_spreads();
+    test_shadow_sum();
+    test_shadow_aniso();
     printf("%d/%d verificações ok\n", g_run - g_fail, g_run);
     return g_fail ? 1 : 0;
 }
