@@ -810,6 +810,25 @@ static void shot_check(void) {
         fwrite(&fh, sizeof fh, 1, f); fwrite(&ih, sizeof ih, 1, f); fwrite(px, 1, (size_t)stride * h, f); fclose(f);
         logf_("captura: %s (%dx%d)", path, w, h);
     }
+    if (cfg.debug && w >= 640 && h >= 360) {           // debug: cópia pequena (640x360) com nome fixo, para conferir rápido
+        int sw = 640, sh = 360, ss = sw * 3;
+        BYTE *sp = malloc((size_t)ss * sh);
+        if (sp) {
+            for (int y = 0; y < sh; y++) for (int x = 0; x < sw; x++) {
+                int x0 = x * w / sw, x1 = (x + 1) * w / sw, y0 = y * h / sh, y1 = (y + 1) * h / sh, n = 0, a[3] = { 0, 0, 0 };
+                for (int yy = y0; yy < y1; yy++) for (int xx = x0; xx < x1; xx++, n++) { const BYTE *q = px + (size_t)yy * stride + xx * 3; a[0] += q[0]; a[1] += q[1]; a[2] += q[2]; }
+                BYTE *d = sp + (size_t)y * ss + x * 3; for (int c = 0; c < 3; c++) d[c] = (BYTE)(n ? a[c] / n : 0);
+            }
+            snprintf(path, sizeof path, "%s\\ultima.bmp", dir);
+            if ((f = fopen(path, "wb")) != NULL) {
+                BITMAPFILEHEADER fh = { 0x4d42, 0, 0, 0, sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) };
+                BITMAPINFOHEADER ih = { sizeof ih, sw, sh, 1, 24, BI_RGB, (DWORD)ss * sh, 2835, 2835, 0, 0 };
+                fh.bfSize = fh.bfOffBits + ih.biSizeImage;
+                fwrite(&fh, sizeof fh, 1, f); fwrite(&ih, sizeof ih, 1, f); fwrite(sp, 1, (size_t)ss * sh, f); fclose(f);
+            }
+            free(sp);
+        }
+    }
     free(px);
 }
 static BOOL WINAPI h_wglSwapBuffers(HDC dc) { fbo_present(); shot_check(); BOOL r = r_wglSwapBuffers(dc); fbo_rebind(); after_swap(); return r; }
@@ -3698,7 +3717,7 @@ static void write_site(DWORD va, const BYTE *expect, int n, void *stub, const ch
 // Alcance de cada objeto: o jogo compara a distância com o alcance do objeto (word +0x76) e desliga quem está fora.
 // O mod multiplica esse alcance. Diagnóstico (debug=1): registra os objetos que só ficam ligados por causa do mod e
 // F6 escolhe um tipo deles para ficar com o alcance original (para achar o que esconde o Piu-Piu).
-static struct { BYTE cat; WORD id; } g_rtypes[64]; static int g_rtypen, g_rexcl = -1;
+static struct { BYTE cat; WORD id; } g_rtypes[64]; static int g_rtypen, g_rexcl = -1, g_rlogic;
 static int rtype_index(BYTE cat, WORD id, int add) {
     for (int i = 0; i < g_rtypen; i++) if (g_rtypes[i].cat == cat && g_rtypes[i].id == id) return i;
     if (add && g_rtypen < 64) { g_rtypes[g_rtypen].cat = cat; g_rtypes[g_rtypen].id = id; return g_rtypen++; }
@@ -3720,7 +3739,8 @@ static DWORD __cdecl range_decide(const BYTE *o, DWORD dist, DWORD range) {
                   *(const WORD *)(o + 0x36), *(const DWORD *)(o + 0x9c), *(const DWORD *)(o + 0x118), range, dist);
         }
     }
-    if (g_rexcl >= 0 && ti == g_rexcl) return range;   // F6: esse tipo fica com o alcance original
+    if (g_rexcl >= 0 && ti == g_rexcl) return range;   // F7: esse tipo fica com o alcance original
+    if (g_rlogic && cat == 0x10) return range;          // F6: objetos de lógica (categoria 0x10) com o alcance original
     return eff;
 }
 static void install_object_hooks(void) {
@@ -4008,14 +4028,17 @@ static void install_pad_prompts(void) {
 // debug=1: F9 passa por alcance/LOD do mod e originais (4 combinações); F6 escolhe um tipo de objeto para ficar com
 // o alcance original; F11 liga/desliga os efeitos de imagem
 static void debug_keys(void) {
-    static int prev6;
+    static int prev6, prev7;
     int d6 = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
-    if (d6 && !prev6) {
-        g_rexcl = g_rexcl + 1 >= g_rtypen ? -1 : g_rexcl + 1;
-        if (g_rexcl < 0) logf_("F6: todos os tipos com o alcance do mod");
-        else logf_("F6: tipo %d (cat %02x id %04x) com o alcance ORIGINAL", g_rexcl, g_rtypes[g_rexcl].cat, g_rtypes[g_rexcl].id);
-    }
+    if (d6 && !prev6) { g_rlogic = !g_rlogic; logf_("F6: objetos de logica (cat 10) com o alcance %s", g_rlogic ? "ORIGINAL" : "do mod"); }
     prev6 = d6;
+    int d7 = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
+    if (d7 && !prev7) {
+        g_rexcl = g_rexcl + 1 >= g_rtypen ? -1 : g_rexcl + 1;
+        if (g_rexcl < 0) logf_("F7: todos os tipos com o alcance do mod");
+        else logf_("F7: tipo %d (cat %02x id %04x) com o alcance ORIGINAL", g_rexcl, g_rtypes[g_rexcl].cat, g_rtypes[g_rexcl].id);
+    }
+    prev7 = d7;
     static int prev8;
     int d8 = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
     if (d8 && !prev8) { g_sim_pad = (g_sim_pad + 1) % 3; logf_("F8: controle %s", g_sim_pad == 1 ? "DESCONECTADO (simulado)" : g_sim_pad == 2 ? "CONECTADO (simulado)" : "real"); }
