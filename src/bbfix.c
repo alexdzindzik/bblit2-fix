@@ -3809,7 +3809,35 @@ static void __cdecl op14_out(DWORD via) {
     logf_("op14: resultado via %lu tecla %02lx pad %d | %s", via, *(DWORD *)0x4d5f20, (int)g_pad_on, hx);
     nl++;
 }
+// hud_probe: cada texto novo que passa pela função de texto do jogo (0x466ce0), com os 4 argumentos e os bytes crus
+static void __cdecl txt_log(const DWORD *sp) {
+    static DWORD seen[512]; static int nseen, nl;
+    if (nl >= 400) return;
+    const BYTE *t = (const BYTE *)sp[2];
+    if (!t || IsBadReadPtr(t, 160)) return;
+    DWORD h = 2166136261u;
+    for (int i = 0; i < 48; i++) h = (h ^ t[i]) * 16777619u;
+    for (int i = 0; i < nseen; i++) if (seen[i] == h) return;
+    if (nseen < 512) seen[nseen++] = h;
+    char hx[160 * 3 + 1], as[161]; int o = 0;
+    for (int i = 0; i < 160; i++) { o += snprintf(hx + o, sizeof hx - o, "%02x ", t[i]); as[i] = t[i] >= 32 && t[i] < 127 ? (char)t[i] : '.'; }
+    as[160] = 0;
+    logf_("texto: a1 %08lx a3 %08lx a4 %08lx | %s| %s", sp[1], sp[3], sp[4], as, hx);
+    nl++;
+}
 static void install_op14_probe(void) {
+    static const BYTE e0[] = { 0x81, 0xec, 0xcc, 0x00, 0x00, 0x00 };   // 0x466ce0: sub esp, 0xcc
+    if (!memcmp((void *)0x466ce0, e0, sizeof e0)) {
+        BYTE *s0 = stub_mem(64), *q = s0;
+        *q++ = 0x60;                                                          // pushad
+        *q++ = 0x8d; *q++ = 0x44; *q++ = 0x24; *q++ = 0x20;                   // lea eax, [esp+0x20] (esp original)
+        *q++ = 0x50;                                                          // push eax
+        *q++ = 0xe8; *(DWORD *)q = (DWORD)txt_log - (DWORD)(q + 4); q += 4;   // call txt_log
+        *q++ = 0x83; *q++ = 0xc4; *q++ = 0x04; *q++ = 0x61;                   // add esp, 4 / popad
+        memcpy(q, e0, sizeof e0); q += sizeof e0;
+        put_jmp(q, (void *)0x466ce6);
+        write_site(0x466ce0, e0, sizeof e0, s0, "texto do jogo");
+    } else logf_("texto: bytes inesperados em 0x466ce0");
     static const BYTE e[] = { 0x8b, 0xfa, 0x83, 0xff, 0x14 };   // mov edi, edx / cmp edi, 0x14
     if (memcmp((void *)0x4673c6, e, sizeof e)) { logf_("op14: bytes inesperados"); return; }
     BYTE *st = stub_mem(64), *p = st;
