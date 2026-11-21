@@ -1140,6 +1140,8 @@ static void tex_dilate(DWORD *p, int w, int h) {
 // as teclas Enter e Esc viram A e Menu só enquanto o controle está conectado.
 static const char *k_btn_name[BTN_N] = { "A", "B", "X", "Y", "LB", "RB", "LT", "RT", "START", "BACK" };
 static volatile int g_pad_on;   // há controle XInput conectado
+static volatile DWORD g_f4_prompt_tick;   // última vez que uma dica pediu o nome do F4 ("menu anterior" na tela)
+static volatile LONG g_f4_prompt_n;       // diagnóstico: quantas vezes
 static const struct { unsigned long long hash; int btn; int cond; } k_icon_tex[] = {
     { 0x079f890026d2ae47ULL, BTN_A, 0 }, { 0x72807a011ac598afULL, BTN_B, 0 }, { 0x17d83bb848a1fdbdULL, BTN_X, 0 },
     { 0xa145955d605231e4ULL, BTN_Y, 0 }, { 0xb9e89ce9a01b0e7cULL, BTN_LB, 0 }, { 0x6098e087052818c0ULL, BTN_RB, 0 },
@@ -1805,6 +1807,8 @@ static void pr_tick(void) {
             if (pr_cnt[f][k]) { any = 1; if (o < (int)sizeof buf - 40) o += snprintf(buf + o, sizeof buf - o, " %s/%s=%u", pr_names[f], pr_kind_name(k), pr_cnt[f][k]); }
     if (any) { logf_("hud_probe (5 s):%s", buf); nl++; }
     memset(pr_cnt, 0, sizeof pr_cnt);
+    LONG f4 = InterlockedExchange(&g_f4_prompt_n, 0);
+    if (f4) logf_("hud_probe (5 s): dica do F4 pedida %ld vezes", f4);
 }
 
 #define H(name) { #name, (void **)&r_##name, (void *)h_##name }
@@ -3067,6 +3071,10 @@ static void poll_pad(void) {
     if (b & XB_RB) PRESS(g_vk[K_CAMSW], g_dik[K_CAMSW]);
     if (b & XB_START) PRESS(VK_ESCAPE, 0x01);          // menu / pausa
     if (b & XB_BACK) PRESS(VK_F4, 0x3E);               // "F4 menu anterior"
+    if ((b & XB_B) && pad_menu_back(now, g_f4_prompt_tick)) {   // com "menu anterior" na tela, B também volta
+        PRESS(VK_F4, 0x3E);
+        static int nl; if (nl++ < 5) logf_("controle: B volta ao menu anterior (F4)");
+    }
     int caml = 0, camr = 0;
     {   // gatilhos: LT/RT (invert_camera_triggers troca o lado)
         int lt = p->bLeftTrigger > 60, rt = p->bRightTrigger > 60;
@@ -3764,11 +3772,12 @@ static int btn_for_scancode(int sc) {
     if (sc == (int)keys[K_CAMR]) return cfg.inv_trig ? BTN_LT : BTN_RT;
     if (sc == 0x1c && cfg.a_enter) return a;
     if (sc == 0x01) return BTN_START;
-    if (sc == 0x3e) return BTN_BACK;
+    if (sc == 0x3e) return b;                               // "menu anterior": B volta, como no Xbox (o View também)
     return -1;
 }
 typedef int (__cdecl *PFN_KeyName)(int sc, char *buf);
 static int __cdecl kn_text(int sc, char *buf) {
+    if (sc == 0x3e) { DWORD t = GetTickCount(); g_f4_prompt_tick = t ? t : 1; InterlockedIncrement(&g_f4_prompt_n); }
     if (cfg.xinput && cfg.pad_prompts && g_pad_on && buf) {
         int b = btn_for_scancode(sc);
         if (b >= 0) {

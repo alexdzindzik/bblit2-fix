@@ -56,11 +56,19 @@ static void test_back_advance_matches_icon(void) {
     CHECK(pad_icon_advance(BTN_A) == 0);                 // os demais ficam como o jogo definiu
 }
 
+static void test_b_goes_back_while_f4_prompt_on_screen(void) {
+    CHECK(pad_menu_back(10000, 9900) == 1);              // a dica "F4 menu anterior" passou há 100 ms
+    CHECK(pad_menu_back(10000, 9000) == 0);              // faz 1 s que ela não aparece: B volta a ser só "orelhas"
+    CHECK(pad_menu_back(10000, 0) == 0);                 // nunca apareceu
+    CHECK(pad_menu_back(50, 0xFFFFFFF0u) == 1);          // GetTickCount deu a volta
+}
+
 int main(void) {
     test_icon_chars_hit_their_glyph();
     test_face_buttons_round_and_letter_sized();
     test_back_is_a_round_button();
     test_back_advance_matches_icon();
+    test_b_goes_back_while_f4_prompt_on_screen();
     printf("%d/%d verificações ok\n", g_run - g_fail, g_run);
     return g_fail ? 1 : 0;
 }

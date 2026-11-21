@@ -17,3 +17,6 @@ int pad_icon_geom(int btn, int w, int h, ICON_GEOM *g) {
 }
 // o "START" do PS1 (0x0b) avança 50; com o ícone redondo do BACK no lugar, avança como os outros ícones
 int pad_icon_advance(int btn) { return btn == BTN_BACK ? 17 : 0; }
+int pad_menu_back(unsigned now, unsigned prompt_tick) {
+    return prompt_tick != 0 && (unsigned)(now - prompt_tick) < 300u;
+}
