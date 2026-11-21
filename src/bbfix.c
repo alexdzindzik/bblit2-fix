@@ -3972,7 +3972,7 @@ static void install_pad_prompts(void) {
     logf_("dicas de botao: com controle conectado, as teclas viram botoes do Xbox (%s)", cfg.pad_prompts == 2 ? "icones" : "nomes");
 }
 
-// debug=1: F9 alterna entre as distâncias originais (100%) e as do mod; F11 liga/desliga os efeitos de imagem
+// debug=1: F9 passa por alcance/LOD do mod e originais (4 combinações); F11 liga/desliga os efeitos de imagem
 static void debug_keys(void) {
     static int prev8;
     int d8 = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
@@ -3986,13 +3986,14 @@ static void debug_keys(void) {
     if (d10 && !prev10 && cfg.hud_probe && !pr_frame_dump) pr_frame_dump = 1;
     prev10 = d10;
     prev11 = d11;
-    static int prev, orig;
+    static int prev, st;                    // F9 em 4 passos: alcance e LOD separados, para achar qual dos dois causa algo
     int down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
     if (down && !prev) {
-        orig = !orig;
-        g_kr = orig ? 256 : cfg.actor_dist * 256 / 100;
-        g_klod = orig ? 256 : cfg.lod_dist * 256 / 100;
-        logf_("F9: distancias de objetos e LOD %s", orig ? "ORIGINAIS (100%)" : "do mod");
+        st = (st + 1) % 4;
+        int orig_r = st == 1 || st == 3, orig_l = st == 2 || st == 3;
+        g_kr = orig_r ? 256 : cfg.actor_dist * 256 / 100;
+        g_klod = orig_l ? 256 : cfg.lod_dist * 256 / 100;
+        logf_("F9 (%d): alcance dos objetos %s, LOD %s", st, orig_r ? "ORIGINAL" : "do mod", orig_l ? "ORIGINAL" : "do mod");
     }
     prev = down;
 }
