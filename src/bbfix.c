@@ -3717,16 +3717,20 @@ static void write_site(DWORD va, const BYTE *expect, int n, void *stub, const ch
 // Alcance de cada objeto: o jogo compara a distância com o alcance do objeto (word +0x76) e desliga quem está fora.
 // O mod multiplica esse alcance. Diagnóstico (debug=1): registra os objetos que só ficam ligados por causa do mod e
 // F6 escolhe um tipo deles para ficar com o alcance original (para achar o que esconde o Piu-Piu).
-static struct { BYTE cat; WORD id; } g_rtypes[64]; static int g_rtypen, g_rexcl = -1, g_rlogic;
+static struct { BYTE cat; WORD id; } g_rtypes[64]; static int g_rtypen, g_rexcl = -1, g_rlogic = 1;
 static int rtype_index(BYTE cat, WORD id, int add) {
     for (int i = 0; i < g_rtypen; i++) if (g_rtypes[i].cat == cat && g_rtypes[i].id == id) return i;
     if (add && g_rtypen < 64) { g_rtypes[g_rtypen].cat = cat; g_rtypes[g_rtypen].id = id; return g_rtypen++; }
     return -1;
 }
 static DWORD __cdecl range_decide(const BYTE *o, DWORD dist, DWORD range) {
+    BYTE cat = o[0x31];
+    // objetos de lógica (categoria 0x10: sem modelo, gatilhos e pontos de passagem) não ganham nada visível com o
+    // alcance maior e, ligados de longe, mexem no jogo (o Piu-Piu ia parar num ponto distante): alcance original
+    if (cat == 0x10 && g_rlogic) return range;
     DWORD eff = (DWORD)(((unsigned long long)range * (DWORD)g_kr) >> 8);
     if (!cfg.debug || g_kr == 256) return eff;
-    BYTE cat = o[0x31]; WORD id = *(const WORD *)(o + 0x14c);
+    WORD id = *(const WORD *)(o + 0x14c);
     int band = dist > range && dist <= eff;            // ligado só por causa do mod
     int ti = rtype_index(cat, id, band);
     if (band) {
@@ -3740,7 +3744,6 @@ static DWORD __cdecl range_decide(const BYTE *o, DWORD dist, DWORD range) {
         }
     }
     if (g_rexcl >= 0 && ti == g_rexcl) return range;   // F7: esse tipo fica com o alcance original
-    if (g_rlogic && cat == 0x10) return range;          // F6: objetos de lógica (categoria 0x10) com o alcance original
     return eff;
 }
 static void install_object_hooks(void) {
@@ -4030,7 +4033,7 @@ static void install_pad_prompts(void) {
 static void debug_keys(void) {
     static int prev6, prev7;
     int d6 = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
-    if (d6 && !prev6) { g_rlogic = !g_rlogic; logf_("F6: objetos de logica (cat 10) com o alcance %s", g_rlogic ? "ORIGINAL" : "do mod"); }
+    if (d6 && !prev6) { g_rlogic = !g_rlogic; logf_("F6: objetos de logica (cat 10) com o alcance %s", g_rlogic ? "ORIGINAL (padrao)" : "do mod (como antes)"); }
     prev6 = d6;
     int d7 = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
     if (d7 && !prev7) {
