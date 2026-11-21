@@ -1463,6 +1463,7 @@ static unsigned long long g_dbg_hash; static int g_dbg_name;
 static int tex_hooks_on(void) { return g_hd_n || cfg.dump_tex || cfg.hud_probe || (cfg.xinput && cfg.pad_prompts == 2); }
 // tipo de HUD de cada textura do jogo (HUD_NONE/SPRITE/BAR_FILL/3D), por nome, marcado no envio
 static unsigned char g_hud_kind_by_name[8192];
+static unsigned long long g_tex_hash[8192]; static unsigned short g_tex_w[8192], g_tex_h[8192];   // hash e tamanho por nome (diagnóstico)
 static void hud_mark_tex(GLuint name, int kind) { if (name < sizeof g_hud_kind_by_name) g_hud_kind_by_name[name] = (unsigned char)kind; }
 static int hud_tex_kind(GLuint name) { return name < sizeof g_hud_kind_by_name ? g_hud_kind_by_name[name] : HUD_NONE; }
 static int tex_upload_hd(GLenum t, GLint ifmt, GLsizei w, GLsizei h, GLenum f, GLenum ty, const void *px) {
@@ -1484,6 +1485,7 @@ static int tex_upload_hd(GLenum t, GLint ifmt, GLsizei w, GLsizei h, GLenum f, G
         unsigned long long hs = tex_lhash(rgba, w, h);
         g_dbg_hash = hs;
         hud_mark_tex((GLuint)name, hud_kind(hs));
+        if ((GLuint)name < 8192) { g_tex_hash[name] = hs; g_tex_w[name] = (unsigned short)w; g_tex_h[name] = (unsigned short)h; }
         if (cfg.dump_tex) tex_dump(hs, w, h, f, ty, ifmt, rgba);
         done = hd_replace(t, ifmt, w, h, rgba, hs, (GLuint)name);
     }
@@ -1592,10 +1594,13 @@ static PFN_LLA r_LoadLibraryA;
 static GLuint pr_tex; static int pr_kind, pr_in, pr_mode, pr_nv;
 static float pr_v[16][4], pr_tc[16][2], pr_cur_tc[2];
 enum { PR_BEGIN, PR_V2F, PR_V2FV, PR_V2I, PR_V2S, PR_V3F, PR_V3FV, PR_V3I, PR_V4F, PR_V4FV, PR_TC2F, PR_TC2FV,
-       PR_DRAWARRAYS, PR_DRAWELEMENTS, PR_CALLLIST, PR_CALLLISTS, PR_RECTF, PR_RECTI, PR_N };
+       PR_DRAWARRAYS, PR_DRAWELEMENTS, PR_CALLLIST, PR_CALLLISTS, PR_RECTF, PR_RECTI, PR_TCX, PR_COLOR, PR_N };
 static const char *const pr_names[PR_N] = { "Begin", "Vertex2f", "Vertex2fv", "Vertex2i", "Vertex2s", "Vertex3f",
     "Vertex3fv", "Vertex3i", "Vertex4f", "Vertex4fv", "TexCoord2f", "TexCoord2fv", "DrawArrays", "DrawElements",
-    "CallList", "CallLists", "Rectf", "Recti" };
+    "CallList", "CallLists", "Rectf", "Recti", "TexCoord(outra)", "Color" };
+// F10 (com debug=1): registra todos os desenhos 2D (|z| < 50) do próximo quadro, com textura, hash, cor e retângulo
+static int pr_frame_dump;                            // 1 = armado, 2 = registrando o quadro atual
+static float pr_col[4] = { 1, 1, 1, 1 };
 static unsigned pr_cnt[PR_N][4];
 static struct { GLint size; GLenum type; GLsizei stride; const void *ptr; } pr_vp, pr_tp;
 static void (APIENTRY *r_BindTexture)(GLenum, GLuint);
@@ -1623,7 +1628,7 @@ static void (APIENTRY *r_TexCoordPointer)(GLint, GLenum, GLsizei, const void *);
 static const char *pr_kind_name(int k) { return k == HUD_SPRITE ? "sprite" : k == HUD_BAR_FILL ? "barra" : k == HUD_3D ? "3D" : "-"; }
 static void pr_count(int f) { if (pr_kind) pr_cnt[f][pr_kind]++; }
 static void pr_vert(float x, float y, float z, float w) {
-    if (!pr_in || !pr_kind || pr_nv >= 16) return;
+    if (!pr_in || (!pr_kind && pr_frame_dump != 2) || pr_nv >= 16) return;
     pr_v[pr_nv][0] = x; pr_v[pr_nv][1] = y; pr_v[pr_nv][2] = z; pr_v[pr_nv][3] = w;
     pr_tc[pr_nv][0] = pr_cur_tc[0]; pr_tc[pr_nv][1] = pr_cur_tc[1]; pr_nv++;
 }
@@ -1666,10 +1671,57 @@ static void pr_fetch(int idx, float *v, float *tc) {
 }
 static void APIENTRY h_BindTexture(GLenum t, GLuint n) { if (t == GL_TEXTURE_2D) { pr_tex = n; pr_kind = hud_tex_kind(n); } r_BindTexture(t, n); }
 static void APIENTRY h_Begin(GLenum m) { pr_count(PR_BEGIN); pr_in = 1; pr_mode = (int)m; pr_nv = 0; r_Begin(m); }
+static void pr_dump_batch(void) {
+    static int nl;
+    if (pr_nv < 1 || fabsf(pr_v[0][2]) >= 50 || nl >= 3000) return;
+    float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f, s0 = 1e9f, t0 = 1e9f, s1 = -1e9f, t1 = -1e9f;
+    for (int i = 0; i < pr_nv; i++) {
+        if (pr_v[i][0] < x0) x0 = pr_v[i][0]; if (pr_v[i][0] > x1) x1 = pr_v[i][0];
+        if (pr_v[i][1] < y0) y0 = pr_v[i][1]; if (pr_v[i][1] > y1) y1 = pr_v[i][1];
+        if (pr_tc[i][0] < s0) s0 = pr_tc[i][0]; if (pr_tc[i][0] > s1) s1 = pr_tc[i][0];
+        if (pr_tc[i][1] < t0) t0 = pr_tc[i][1]; if (pr_tc[i][1] > t1) t1 = pr_tc[i][1];
+    }
+    GLuint k = pr_tex < 8192 ? pr_tex : 0;
+    GLboolean tx = glIsEnabled(GL_TEXTURE_2D), bl = glIsEnabled(GL_BLEND), at = glIsEnabled(GL_ALPHA_TEST);
+    logf_("quadro: tex %u %016llx %ux%u tx%d bl%d at%d cor %.2f %.2f %.2f %.2f modo %d nv %d ret %.1f,%.1f - %.1f,%.1f z %.2f tc %.3f,%.3f - %.3f,%.3f",
+          pr_tex, g_tex_hash[k], g_tex_w[k], g_tex_h[k], tx, bl, at, pr_col[0], pr_col[1], pr_col[2], pr_col[3], pr_mode, pr_nv, x0, y0, x1, y1, pr_v[0][2], s0, t0, s1, t1);
+    nl++;
+}
 static void APIENTRY h_End(void) {
+    if (pr_in && pr_frame_dump == 2) pr_dump_batch();
     if (pr_in && pr_kind && pr_nv) pr_log_draw("Begin/End", pr_mode, pr_nv, (const float (*)[4])pr_v, (const float (*)[2])pr_tc);
     pr_in = 0; r_End();
 }
+static void (APIENTRY *r_TexCoord2d)(GLdouble, GLdouble);
+static void (APIENTRY *r_TexCoord2dv)(const GLdouble *);
+static void (APIENTRY *r_TexCoord2i)(GLint, GLint);
+static void (APIENTRY *r_TexCoord2s)(GLshort, GLshort);
+static void (APIENTRY *r_TexCoord3f)(GLfloat, GLfloat, GLfloat);
+static void (APIENTRY *r_TexCoord3fv)(const GLfloat *);
+static void (APIENTRY *r_TexCoord4f)(GLfloat, GLfloat, GLfloat, GLfloat);
+static void (APIENTRY *r_TexCoord4fv)(const GLfloat *);
+static void (APIENTRY *r_Color4ub)(GLubyte, GLubyte, GLubyte, GLubyte);
+static void (APIENTRY *r_Color4ubv)(const GLubyte *);
+static void (APIENTRY *r_Color4f)(GLfloat, GLfloat, GLfloat, GLfloat);
+static void (APIENTRY *r_Color4fv)(const GLfloat *);
+static void (APIENTRY *r_Color3f)(GLfloat, GLfloat, GLfloat);
+static void (APIENTRY *r_Color3ub)(GLubyte, GLubyte, GLubyte);
+static void pr_tcx(float s0, float t0) { pr_count(PR_TCX); pr_cur_tc[0] = s0; pr_cur_tc[1] = t0; }
+static void pr_color(float r, float g, float b, float a) { pr_count(PR_COLOR); pr_col[0] = r; pr_col[1] = g; pr_col[2] = b; pr_col[3] = a; }
+static void APIENTRY h_TexCoord2d(GLdouble a, GLdouble b) { pr_tcx((float)a, (float)b); r_TexCoord2d(a, b); }
+static void APIENTRY h_TexCoord2dv(const GLdouble *p) { pr_tcx((float)p[0], (float)p[1]); r_TexCoord2dv(p); }
+static void APIENTRY h_TexCoord2i(GLint a, GLint b) { pr_tcx((float)a, (float)b); r_TexCoord2i(a, b); }
+static void APIENTRY h_TexCoord2s(GLshort a, GLshort b) { pr_tcx(a, b); r_TexCoord2s(a, b); }
+static void APIENTRY h_TexCoord3f(GLfloat a, GLfloat b, GLfloat c) { pr_tcx(a, b); r_TexCoord3f(a, b, c); }
+static void APIENTRY h_TexCoord3fv(const GLfloat *p) { pr_tcx(p[0], p[1]); r_TexCoord3fv(p); }
+static void APIENTRY h_TexCoord4f(GLfloat a, GLfloat b, GLfloat c, GLfloat d) { pr_tcx(d != 0 ? a / d : a, d != 0 ? b / d : b); r_TexCoord4f(a, b, c, d); }
+static void APIENTRY h_TexCoord4fv(const GLfloat *p) { pr_tcx(p[3] != 0 ? p[0] / p[3] : p[0], p[3] != 0 ? p[1] / p[3] : p[1]); r_TexCoord4fv(p); }
+static void APIENTRY h_Color4ub(GLubyte r, GLubyte g, GLubyte b, GLubyte a) { pr_color(r / 255.f, g / 255.f, b / 255.f, a / 255.f); r_Color4ub(r, g, b, a); }
+static void APIENTRY h_Color4ubv(const GLubyte *p) { pr_color(p[0] / 255.f, p[1] / 255.f, p[2] / 255.f, p[3] / 255.f); r_Color4ubv(p); }
+static void APIENTRY h_Color4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a) { pr_color(r, g, b, a); r_Color4f(r, g, b, a); }
+static void APIENTRY h_Color4fv(const GLfloat *p) { pr_color(p[0], p[1], p[2], p[3]); r_Color4fv(p); }
+static void APIENTRY h_Color3f(GLfloat r, GLfloat g, GLfloat b) { pr_color(r, g, b, 1); r_Color3f(r, g, b); }
+static void APIENTRY h_Color3ub(GLubyte r, GLubyte g, GLubyte b) { pr_color(r / 255.f, g / 255.f, b / 255.f, 1); r_Color3ub(r, g, b); }
 static void APIENTRY h_Vertex2f(GLfloat x, GLfloat y) { pr_count(PR_V2F); pr_vert(x, y, 0, 1); r_Vertex2f(x, y); }
 static void APIENTRY h_Vertex2fv(const GLfloat *p) { pr_count(PR_V2FV); pr_vert(p[0], p[1], 0, 1); r_Vertex2fv(p); }
 static void APIENTRY h_Vertex2i(GLint x, GLint y) { pr_count(PR_V2I); pr_vert((float)x, (float)y, 0, 1); r_Vertex2i(x, y); }
@@ -1715,6 +1767,8 @@ static void APIENTRY h_Recti(GLint a, GLint b, GLint c, GLint d) { pr_count(PR_R
 // resumo a cada 5 s: quantas chamadas de cada função com textura do HUD ligada
 static void pr_tick(void) {
     static DWORD t0; static int nl;
+    if (pr_frame_dump == 2) { pr_frame_dump = 0; logf_("quadro: fim"); }
+    if (pr_frame_dump == 1) { pr_frame_dump = 2; logf_("quadro: inicio (F10)"); }
     if (!cfg.hud_probe || nl >= 120) return;
     DWORD now = GetTickCount();
     if (!t0) t0 = now;
@@ -1738,7 +1792,9 @@ static struct { const char *name; void **real; void *hook; } gl_hooks[] = {
 static struct { const char *name; void **real; void *hook; } gl_probe_hooks[] = {
     H(BindTexture), H(Begin), H(End), H(Vertex2f), H(Vertex2fv), H(Vertex2i), H(Vertex2s), H(Vertex3f), H(Vertex3fv),
     H(Vertex3i), H(Vertex4f), H(Vertex4fv), H(TexCoord2f), H(TexCoord2fv), H(DrawArrays), H(DrawElements), H(CallList),
-    H(CallLists), H(Rectf), H(Recti), H(VertexPointer), H(TexCoordPointer),
+    H(CallLists), H(Rectf), H(Recti), H(VertexPointer), H(TexCoordPointer), H(TexCoord2d), H(TexCoord2dv), H(TexCoord2i),
+    H(TexCoord2s), H(TexCoord3f), H(TexCoord3fv), H(TexCoord4f), H(TexCoord4fv), H(Color4ub), H(Color4ubv), H(Color4f),
+    H(Color4fv), H(Color3f), H(Color3ub),
 };
 #undef H
 
@@ -3725,6 +3781,10 @@ static void debug_keys(void) {
     static int prev11;
     int d11 = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
     if (d11 && !prev11) { g_fx_bypass = !g_fx_bypass; logf_("F11: efeitos de imagem %s", g_fx_bypass ? "DESLIGADOS" : "ligados"); }
+    static int prev10;
+    int d10 = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
+    if (d10 && !prev10 && cfg.hud_probe && !pr_frame_dump) pr_frame_dump = 1;
+    prev10 = d10;
     prev11 = d11;
     static int prev, orig;
     int down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
