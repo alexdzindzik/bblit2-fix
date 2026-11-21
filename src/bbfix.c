@@ -3744,11 +3744,18 @@ static void install_object_hooks(void) {
 
     // LOD dos modelos: 0x45f3f2 compara a distância (em [esi]) com byte[+0x121]*256 e byte[+0x122]*256 para trocar
     // para os modelos simplificados. A distância é dividida por lod_distance/100 logo antes (histerese incluída).
+    // Essa distância fica guardada no objeto e o resto do jogo também a usa: ela volta ao valor original no fim da
+    // escolha do LOD (0x45f562, onde todos os caminhos se juntam). Sem isso, o Piu-Piu sumia com lod_distance alto.
     g_klod = cfg.lod_dist * 256 / 100;
     static const BYTE l1[] = { 0x33, 0xc0, 0x8a, 0xa3, 0x21, 0x01, 0x00, 0x00 };   // xor eax,eax / mov ah,[ebx+0x121]
+    static const BYTE l2[] = { 0x8b, 0x54, 0x24, 0x18, 0x8b, 0xc2 };              // 0x45f562: mov edx,[esp+0x18] / mov eax,edx
     if (cfg.lod_dist == 100) logf_("LOD dos modelos: original");
-    else if (!memcmp((void *)0x45f3f2, l1, sizeof l1)) {
+    else if (!memcmp((void *)0x45f3f2, l1, sizeof l1) && !memcmp((void *)0x45f562, l2, sizeof l2)) {
+        static volatile DWORD *lod_ptr; static volatile DWORD lod_saved;
         BYTE *st = stub_mem(64), *p = st;
+        *p++ = 0x89; *p++ = 0x35; *(DWORD *)p = (DWORD)&lod_ptr; p += 4;   // mov [lod_ptr], esi
+        *p++ = 0x8b; *p++ = 0x06;                                          // mov eax, [esi]
+        *p++ = 0xa3; *(DWORD *)p = (DWORD)&lod_saved; p += 4;              // mov [lod_saved], eax
         *p++ = 0x51; *p++ = 0x52;                                          // push ecx / push edx
         *p++ = 0x8b; *p++ = 0x06;                                          // mov eax, [esi]
         *p++ = 0xb9; *(DWORD *)p = 0x100; p += 4;                          // mov ecx, 256
@@ -3759,6 +3766,22 @@ static void install_object_hooks(void) {
         memcpy(p, l1, sizeof l1); p += sizeof l1;                         // instruções originais
         p += put_jmp(p, (void *)0x45f3fa);
         write_site(0x45f3f2, l1, sizeof l1, st, "LOD dos modelos");
+        BYTE *s2 = stub_mem(64);                                           // fim da escolha: devolve a distância
+        p = s2;
+        *p++ = 0x50;                                                       // push eax
+        *p++ = 0xa1; *(DWORD *)p = (DWORD)&lod_ptr; p += 4;                // mov eax, [lod_ptr]
+        *p++ = 0x85; *p++ = 0xc0;                                          // test eax, eax
+        BYTE *jz = p; *p++ = 0x74; *p++ = 0;                               // jz fim
+        *p++ = 0x51;                                                       // push ecx
+        *p++ = 0x8b; *p++ = 0x0d; *(DWORD *)p = (DWORD)&lod_saved; p += 4; // mov ecx, [lod_saved]
+        *p++ = 0x89; *p++ = 0x08;                                          // mov [eax], ecx
+        *p++ = 0x59;                                                       // pop ecx
+        *p++ = 0xc7; *p++ = 0x05; *(DWORD *)p = (DWORD)&lod_ptr; p += 4; *(DWORD *)p = 0; p += 4;   // mov [lod_ptr], 0
+        jz[1] = (BYTE)(p - (jz + 2));
+        *p++ = 0x58;                                                       // pop eax
+        memcpy(p, l2, sizeof l2); p += sizeof l2;                          // instruções originais
+        p += put_jmp(p, (void *)0x45f568);
+        write_site(0x45f562, l2, sizeof l2, s2, "LOD dos modelos (devolve a distancia)");
         logf_("LOD dos modelos: %d%%", cfg.lod_dist);
     } else logf_("LOD dos modelos: bytes inesperados, desligado");
 }
