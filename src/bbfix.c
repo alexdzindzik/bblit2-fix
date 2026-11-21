@@ -1237,16 +1237,40 @@ static void btn_color(int b, float *r, float *g, float *bb) {
 // linha da textura aparece 1,6x mais alta que uma coluna é larga: o desenho é feito num canvas com essa proporção e
 // depois comprimido na vertical. Posições em texels da textura original (de cima para baixo), como as letras: corpo
 // das maiúsculas nas linhas 7..14.
+// retângulo (contorno de espessura t, e miolo opcional) no canvas
+static void canvas_rect(PX4 *cv, int CW, int CH, float x0, float y0, float x1, float y1, float t, float fill) {
+    for (int y = (int)y0; y <= (int)y1; y++) for (int x = (int)x0; x <= (int)x1; x++) {
+        if (x < 0 || y < 0 || x >= CW || y >= CH) continue;
+        float px = x + 0.5f, py = y + 0.5f;
+        if (px < x0 || px > x1 || py < y0 || py > y1) continue;
+        int edge = px < x0 + t || px > x1 - t || py < y0 + t || py > y1 - t;
+        if (edge) px_over(&cv[(size_t)y * CW + x], 0.95f, 0.95f, 0.95f, 1);
+        else if (fill >= 0) px_over(&cv[(size_t)y * CW + x], fill, fill, fill + 0.02f, 1);
+    }
+}
 static void icon_render(int btn, int w, int h, DWORD *out) {
     const int SS = 4, W = w * 4, H = h * 4;
-    const float AY = 1.6f;
+    ICON_GEOM geo; int round = pad_icon_geom(btn, w, h, &geo);
+    const float AY = round ? geo.ay : 1.6f;              // ícones redondos: proporção do quadro em que o jogo os desenha
     int CW = W * SS, CH = (int)(H * SS * AY + 0.5f);
     PX4 *cv = calloc((size_t)CW * CH, sizeof *cv);
     if (!cv) { memset(out, 0, (size_t)W * H * 4); return; }
     #define TX(t) ((t) * 4.0f * SS)
     #define TY(t) ((t) * 4.0f * SS * AY)
     float r, g, b; btn_color(btn, &r, &g, &b);
-    if (btn == BTN_LB || btn == BTN_RB || btn == BTN_BACK) {        // texto branco com sombra, como "L1" e "START"
+    if (round) {                                                       // Ⓐ Ⓑ Ⓧ Ⓨ e o View (BACK)
+        float cx = TX(geo.cx), cy = TY(geo.cy), rad = TX(geo.rad);
+        canvas_button(cv, CW, CH, cx, cy, rad, r, g, b);
+        if (btn == BTN_BACK) {                                         // ⧉: dois retângulos sobrepostos
+            float t = rad * 0.085f;
+            canvas_rect(cv, CW, CH, cx - rad * 0.42f, cy - rad * 0.38f, cx + rad * 0.16f, cy + rad * 0.10f, t, -1);
+            canvas_rect(cv, CW, CH, cx - rad * 0.16f, cy - rad * 0.10f, cx + rad * 0.42f, cy + rad * 0.38f, t, 0.16f);
+        } else {
+            const char *t = btn == BTN_A ? "A" : btn == BTN_B ? "B" : btn == BTN_X ? "X" : "Y";
+            float lh = rad * 0.95f;
+            canvas_text(cv, CW, CH, t, cx - lh, cy - lh * 0.55f, cx + lh, cy + lh * 0.55f, 0, r, g, b, 0, 0);
+        }
+    } else if (btn == BTN_LB || btn == BTN_RB || btn == BTN_BACK) {        // texto branco com sombra, como "L1" e "START"
         const char *t = btn == BTN_LB ? "LB" : btn == BTN_RB ? "RB" : "BACK";
         float x1 = btn == BTN_BACK ? TX(50) : TX(13.5f);
         canvas_text(cv, CW, CH, t, TX(0), TY(7), x1, TY(14.2f), btn == BTN_BACK, 1, 1, 1, TX(0.9f), TY(0.9f));
@@ -3838,6 +3862,11 @@ static void install_pad_prompts(void) {
     put_jmp((BYTE *)0x46766c, st);
     VirtualProtect(call, 10, old, &old);
     FlushInstructionCache(GetCurrentProcess(), call, 10);
+    if (cfg.pad_prompts == 2) {                         // o "START" do PS1 (0x0b) vira o ícone redondo do View: avanço de ícone
+        BYTE *adv = (BYTE *)0x4cf370 + pad_icon_char(BTN_BACK);
+        if (*adv == 50) { DWORD o2; VirtualProtect(adv, 1, PAGE_READWRITE, &o2); *adv = (BYTE)pad_icon_advance(BTN_BACK); VirtualProtect(adv, 1, o2, &o2); }
+        else logf_("dicas de botao: avanco do BACK inesperado (%d), mantido", *adv);
+    }
     logf_("dicas de botao: com controle conectado, as teclas viram botoes do Xbox (%s)", cfg.pad_prompts == 2 ? "icones" : "nomes");
 }
 

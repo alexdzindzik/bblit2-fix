@@ -25,8 +25,42 @@ static void test_icon_chars_hit_their_glyph(void) {
     }
 }
 
+// Quadro em que o jogo desenha cada glifo (pixels numa tela 2560x1440, medidos com o F10 e nas capturas):
+// letra 16x16 -> 56x90, ícone do PS1 32x32 -> ~76x90, "START" 64x16 -> 176x90. O miolo das letras maiúsculas
+// ocupa 40 px de altura, centrado a 60 px do topo do quadro.
+#define LETTER_H 40.0f
+#define LETTER_MID 60.0f
+static void check_round_button(int btn, int w, int h, float qw, float qh) {
+    ICON_GEOM g;
+    CHECK(pad_icon_geom(btn, w, h, &g));
+    float pc = qw / w, pr = qh / h;                      // pixels por coluna e por linha da textura
+    float ry = g.rad / g.ay;                             // raio em linhas
+    CHECK(g.cx - g.rad >= 0 && g.cx + g.rad <= w);       // cabe na textura
+    CHECK(g.cy - ry >= 0 && g.cy + ry <= h);
+    float dw = 2 * g.rad * pc, dh = 2 * ry * pr;         // tamanho na tela
+    CHECK(dw / dh > 0.96f && dw / dh < 1.04f);           // redondo na tela
+    CHECK(dw > 1.3f * LETTER_H && dw < 1.7f * LETTER_H); // um pouco maior que as letras, como o Ⓐ do Enter
+    float mid = g.cy * pr;
+    CHECK(mid > LETTER_MID - 6 && mid < LETTER_MID + 6); // centrado na altura das letras
+    if (!(dw / dh > 0.96f && dw / dh < 1.04f) || !(mid > LETTER_MID - 6 && mid < LETTER_MID + 6) || !(dw > 1.3f * LETTER_H && dw < 1.7f * LETTER_H))
+        printf("  botao %d: %.0fx%.0f px, centro a %.0f px do topo\n", btn, dw, dh, mid);
+}
+static void test_face_buttons_round_and_letter_sized(void) {
+    for (int b = BTN_A; b <= BTN_Y; b++) check_round_button(b, 32, 32, 76, 90);
+}
+static void test_back_is_a_round_button(void) {
+    check_round_button(BTN_BACK, 64, 16, 176, 90);
+}
+static void test_back_advance_matches_icon(void) {
+    CHECK(pad_icon_advance(BTN_BACK) == 17);             // o "START" do PS1 avançava 50; o ícone redondo ocupa ~17
+    CHECK(pad_icon_advance(BTN_A) == 0);                 // os demais ficam como o jogo definiu
+}
+
 int main(void) {
     test_icon_chars_hit_their_glyph();
+    test_face_buttons_round_and_letter_sized();
+    test_back_is_a_round_button();
+    test_back_advance_matches_icon();
     printf("%d/%d verificações ok\n", g_run - g_fail, g_run);
     return g_fail ? 1 : 0;
 }
