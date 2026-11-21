@@ -20,7 +20,7 @@
 #include "pad_icons.h"
 #include "menu_center.h"
 
-#define FIX_VERSION "0.12.1"
+#define FIX_VERSION "0.12.2"
 
 // ---------------------------------------------------------------- config / log
 static struct {

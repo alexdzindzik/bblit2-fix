@@ -1,5 +1,15 @@
 # Histórico de versões
 
+## 0.12.2
+- **Correção**: com o controle conectado, as dicas não mostravam Ⓐ Ⓑ Ⓧ Ⓨ ("PARA AJUDA." sem o botão). O mod usava caracteres que não existem na fonte do jogo; agora usa os do PlayStation que existem (`0xac`–`0xaf`).
+- **Ícones do controle redondos**, todos do mesmo tamanho e na altura das letras (o jogo desenha cada tipo de ícone num quadro de proporção diferente).
+- **B volta ao menu anterior** nos menus da pausa, e a dica mostra Ⓑ. O View continua funcionando.
+- **Seta do mouse some** enquanto o controle navega nos menus do início e volta quando o mouse se mexe.
+- **Menus "nome ... valor" centralizados** (Opções > Som etc.), que em português ficavam deslocados para a esquerda (`center_menus`).
+- **Correção**: com `object_distance` alto, o Piu-Piu deixava de aparecer onde o Pernalonga estava. Gatilhos e pontos invisíveis (objetos de lógica, sem modelo) voltam ao alcance original.
+- **Problema conhecido**: possivelmente o Piu-Piu ainda pode desaparecer e reaparecer (bug conhecido).
+- **Diagnóstico** (`debug=1`): F9 em 4 passos (alcance e LOD separados), F6/F7 para o alcance por tipo de objeto e cópia pequena da captura em `capturas\ultima.bmp`; `[debug] hud_probe` registra como o jogo desenha o HUD e os textos (preparação da 0.13).
+
 ## 0.12.1
 - **Correção**: com o pacote HD dos menus instalado e `hd_textures=0`, o jogo fechava ao entrar na fase. O contador de imagens HD dos menus tinha o mesmo nome da lista de texturas HD e somava nela. A compilação agora avisa declarações repetidas (`-Wredundant-decls`).
 - **F12 tira uma captura** da imagem do jogo na resolução da janela, sem perdas, em `bin\capturas\` (BMP), já com antisserrilhado e efeitos. Só com o jogo em foco.
