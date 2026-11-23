@@ -54,7 +54,7 @@ Resumo em imagens: [`docs/comparacao_v010.png`](docs/comparacao_v010.png) e [`do
 
 | Controle | Ação |
 |---|---|
-| Analógico esquerdo / direcional | Andar |
+| Analógico esquerdo / direcional | Andar (com `analog_joystick=1`, devagar ou correndo conforme a inclinação, como no PS1) |
 | A | Pular (e Enter nos menus) |
 | X | Chutar |
 | B | Orelhas / escapar |
@@ -62,6 +62,7 @@ Resumo em imagens: [`docs/comparacao_v010.png`](docs/comparacao_v010.png) e [`do
 | LB | Chamar o amigo |
 | RB | Trocar a câmera |
 | LT / RT ou analógico direito | Girar a câmera |
+| Analógico direito, com `right_stick_partner=1` | Mover o amigo ao mesmo tempo, como no PS1 (a câmera fica só no LT / RT) |
 | Clique no analógico direito | Visão em primeira pessoa |
 | Start | Pausa (Esc) |
 | Back | Menu anterior (F4) |

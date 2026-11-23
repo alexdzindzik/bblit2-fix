@@ -19,6 +19,7 @@
 #include "pad_cursor.h"
 #include "pad_icons.h"
 #include "menu_center.h"
+#include "stick_shape.h"
 
 #define FIX_VERSION "0.12.2"
 
@@ -26,6 +27,10 @@
 static struct {
     int enabled, log_gl, aspect, msaa, vsync, xinput, unlock_joy, a_enter, deadzone, cam_stick, swap_ab, language, game_res, background, debug, inv_stick, inv_trig, draw_dist, ssaa, mipmaps, aniso, actor_dist, auto_quality, lod_dist, force_gl, dump_tex, hd_tex, pad_prompts, menu_fill, hires_menu, menu_pad, menu_hd, hud_probe, center_menus;
 } cfg = { 1, 1, 2, 4, 1, 1, 0, 1, 30, 1, 0, -1, 1, 1, 0, 1, 1, 400, 2, 1, 16, 200, 1, 400, 1, 0, 1, 2, 1, 1, 1, 1, 0, 1 };
+// joystick analógico [pad]: o controle XInput oferecido ao jogo como joystick do DirectInput (live = o jogo abriu)
+static struct { int on, partner, dead, start, outer, outer_r, live; } aj = { 0, 0, 10, 20, 95, 90, 0 };
+// analógico direito no pacote do PS1 (bytes 4/5), escrito por xj_GetDeviceState e lido pelo bbfix_rs_stub
+volatile unsigned char bbfix_rx = 0x7f, bbfix_ry = 0x7f;
 // pós-processamento [postfx]: valores em %
 static struct { int on, bloom, threshold, sharpen, saturation, contrast, vignette, brightness; } fx = { 1, 25, 70, 40, 110, 105, 20, 100 };
 
@@ -101,6 +106,12 @@ static void load_config(void) {
     CLAMP_(fx.bloom, 0, 100); CLAMP_(fx.threshold, 0, 100); CLAMP_(fx.sharpen, 0, 100);
     CLAMP_(fx.saturation, 0, 200); CLAMP_(fx.contrast, 50, 150); CLAMP_(fx.vignette, 0, 100);
     CLAMP_(fx.brightness, 50, 200);
+    aj.on      = ini_int("pad", "analog_joystick", 0);
+    aj.partner = ini_int("pad", "right_stick_partner", 0);
+    aj.dead    = ini_int("pad", "analog_deadzone", 10);  CLAMP_(aj.dead, 3, 60);
+    aj.start   = ini_int("pad", "analog_start", 20);     CLAMP_(aj.start, 0, 60);
+    aj.outer   = ini_int("pad", "analog_outer", 95);     CLAMP_(aj.outer, aj.dead + 10, 100);
+    aj.outer_r = ini_int("pad", "analog_outer_right", 90); CLAMP_(aj.outer_r, aj.dead + 10, 100);
     if (cfg.draw_dist < 50) cfg.draw_dist = 50;
     if (cfg.draw_dist > 400) cfg.draw_dist = 400;
 }
@@ -3092,16 +3103,21 @@ static void poll_pad(void) {
     if (b & XB_RIGHT) right = 1;
     BYTE *k = g_padkeys, *d = g_paddik;
 #define PRESS(vk, dik) do { k[(vk)] = 0x80; d[(dik)] = 0x80; } while (0)
+    if (aj.live) {   // joystick analógico: o analógico esquerdo vai pelo joystick, aqui só o direcional
+        up = (b & XB_UP) != 0; down = (b & XB_DOWN) != 0; left = (b & XB_LEFT) != 0; right = (b & XB_RIGHT) != 0;
+    }
     if (up)    { PRESS(g_vk[K_UP], g_dik[K_UP]);       PRESS(VK_UP, 0xC8); }
     if (down)  { PRESS(g_vk[K_DOWN], g_dik[K_DOWN]);   PRESS(VK_DOWN, 0xD0); }
     if (left)  { PRESS(g_vk[K_LEFT], g_dik[K_LEFT]);   PRESS(VK_LEFT, 0xCB); }
     if (right) { PRESS(g_vk[K_RIGHT], g_dik[K_RIGHT]); PRESS(VK_RIGHT, 0xCD); }
-    if (b & XB_A) { PRESS(g_vk[K_JUMP], g_dik[K_JUMP]); if (cfg.a_enter) PRESS(VK_RETURN, 0x1C); }
-    if (b & XB_X) PRESS(g_vk[K_KICK], g_dik[K_KICK]);
-    if (b & XB_B) PRESS(g_vk[K_EARS], g_dik[K_EARS]);
-    if (b & XB_Y) PRESS(g_vk[K_ACTION], g_dik[K_ACTION]);
-    if (b & XB_LB) PRESS(g_vk[K_FRIEND], g_dik[K_FRIEND]);
-    if (b & XB_RB) PRESS(g_vk[K_CAMSW], g_dik[K_CAMSW]);
+    if (b & XB_A) { if (!aj.live) PRESS(g_vk[K_JUMP], g_dik[K_JUMP]); if (cfg.a_enter) PRESS(VK_RETURN, 0x1C); }
+    if (!aj.live) {   // com o joystick analógico, os botões de ação chegam ao jogo por ele
+        if (b & XB_X) PRESS(g_vk[K_KICK], g_dik[K_KICK]);
+        if (b & XB_B) PRESS(g_vk[K_EARS], g_dik[K_EARS]);
+        if (b & XB_Y) PRESS(g_vk[K_ACTION], g_dik[K_ACTION]);
+        if (b & XB_LB) PRESS(g_vk[K_FRIEND], g_dik[K_FRIEND]);
+        if (b & XB_RB) PRESS(g_vk[K_CAMSW], g_dik[K_CAMSW]);
+    }
     if (b & XB_START) PRESS(VK_ESCAPE, 0x01);          // menu / pausa
     if (b & XB_BACK) PRESS(VK_F4, 0x3E);               // "F4 menu anterior"
     if ((b & XB_B) && pad_menu_back(now, g_f4_prompt_tick)) {   // com "menu anterior" na tela, B também volta
@@ -3120,6 +3136,7 @@ static void poll_pad(void) {
         caml |= sl; camr |= sr;
     }
     if (b & XB_RS) caml = camr = 1;   // visão em primeira pessoa = as duas teclas de câmera
+    if (aj.live) caml = camr = 0;      // a câmera também vai pelo joystick
     if (caml) PRESS(g_vk[K_CAML], g_dik[K_CAML]);
     if (camr) PRESS(g_vk[K_CAMR], g_dik[K_CAMR]);
 #undef PRESS
@@ -3535,7 +3552,177 @@ static HRESULT WINAPI h_DID_GetDeviceState(void *self, DWORD cb, void *data) {
     }
     return r;
 }
+
+// ---------------------------------------------------------------- joystick analógico (analog_joystick)
+// O jogo lê um joystick do DirectInput 5 e monta com ele o pacote do controle do PS1 em modo analógico
+// (0x40e7cd: lX/lY + 0x80 -> bytes 6/7 do pacote, id 0x73), então o andar analógico do código do PS1 funciona.
+// O Windows 10/11 muitas vezes não lista joystick DI5 para o controle Xbox (e nenhum quando a Steam Input fica com
+// ele), então o mod oferece um que lê o XInput. Botões na ordem das ações de joystick do jogo (máscaras em
+// 0x488704, mapa padrão 0..9):
+//   0 A = X (pular), 1 X = Quadrado (chutar), 2 B = Círculo (orelhas), 3 LB = L1 (chamar), 4 RB = R1 (câmera),
+//   5 Y = Triângulo (ação), 6/7 = L2/R2 (girar a câmera: LT/RT e o analógico direito; clique = os dois).
+// Start/Back continuam no teclado (Esc/F4), para a pausa não abrir e fechar no mesmo toque.
+static const GUID k_xjoy_guid = { 0xbb2f1a51, 0x77c1, 0x4c2e, { 0x8d, 0x31, 0x58, 0x4a, 0x4f, 0x59, 0x41, 0x4e } };
+static const GUID k_xjoy_prod = { 0x02fd045e, 0x0000, 0x0000, { 0x00, 0x00, 0x50, 0x49, 0x44, 0x56, 0x49, 0x44 } };
+static const GUID k_IID_Unknown = { 0x00000000, 0x0000, 0x0000, { 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
+static const GUID k_IID_DevA  = { 0x5944E680, 0xC92E, 0x11CF, { 0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 } };
+static const GUID k_IID_Dev2A = { 0x5944E682, 0xC92E, 0x11CF, { 0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 } };
+typedef struct { DWORD dwSize; GUID guidInstance, guidProduct; DWORD dwDevType; char inst[260], product[260];
+                 GUID guidFFDriver; WORD wUsagePage, wUsage; } XJ_DEVINST;
+typedef struct { DWORD dwSize, dwHeaderSize, dwObj, dwHow; } XJ_PROPHDR;
+typedef BOOL (CALLBACK *XJ_ENUMCB)(const XJ_DEVINST *, void *);
+typedef HRESULT (WINAPI *PFN_DI_EnumDevices)(void *, DWORD, XJ_ENUMCB, void *, DWORD);
+static PFN_DI_EnumDevices r_DI_EnumDevices;
+static LONG xj_min[2] = { 0, 0 }, xj_max[2] = { 65535, 65535 };
+static DWORD xj_dead = 0;
+static LONG xj_ref = 1;
+static void *xj_obj;
+static int xj_port = -1;
+
+static int xj_pad(XSTATE *st) {
+    if (!x_GetState) init_xinput();
+    if (!x_GetState) return 0;
+    if (xj_port >= 0 && x_GetState((DWORD)xj_port, st) == 0) return 1;
+    for (int i = 0; i < 4; i++) if (x_GetState((DWORD)i, st) == 0) { xj_port = i; return 1; }
+    xj_port = -1; return 0;
+}
+static void xj_info(XJ_DEVINST *d, DWORD size) {
+    if (size > sizeof *d) size = sizeof *d;
+    memset(d, 0, size); d->dwSize = size;
+    d->guidInstance = k_xjoy_guid; d->guidProduct = k_xjoy_prod; d->dwDevType = 0x00010204;  // joystick, gamepad, HID
+    strcpy(d->inst, "Xbox pad (XInput, bblit2-fix)"); strcpy(d->product, "Xbox pad (XInput, bblit2-fix)");
+}
+static HRESULT WINAPI xj_QueryInterface(void *self, REFIID riid, void **out) {
+    if (!out) return E_POINTER;
+    if (IsEqualGUID(riid, &k_IID_DevA) || IsEqualGUID(riid, &k_IID_Dev2A) || IsEqualGUID(riid, &k_IID_Unknown)) {
+        *out = self; InterlockedIncrement(&xj_ref); return S_OK;
+    }
+    *out = NULL; return E_NOINTERFACE;
+}
+static ULONG WINAPI xj_AddRef(void *self) { (void)self; return (ULONG)InterlockedIncrement(&xj_ref); }
+static ULONG WINAPI xj_Release(void *self) { (void)self; LONG r = InterlockedDecrement(&xj_ref); if (r < 1) xj_ref = r = 1; return (ULONG)r; }
+static HRESULT WINAPI xj_GetCapabilities(void *self, DWORD *caps) {
+    (void)self; if (!caps) return E_POINTER;
+    caps[1] = 1 | 2; caps[2] = 0x00010204; caps[3] = 2; caps[4] = 10; caps[5] = 0;   // conectado + leitura por Poll, 2 eixos, 10 botões
+    return S_OK;
+}
+static HRESULT WINAPI xj_EnumObjects(void *self, void *cb, void *ref, DWORD f) { (void)self; (void)cb; (void)ref; (void)f; return S_OK; }
+static HRESULT WINAPI xj_GetProperty(void *self, const GUID *prop, XJ_PROPHDR *h) {
+    (void)self;
+    if ((ULONG_PTR)prop == 4 && h && h->dwHow == 1 && h->dwObj < 8) { LONG *r = (LONG *)(h + 1); r[0] = xj_min[h->dwObj / 4]; r[1] = xj_max[h->dwObj / 4]; return S_OK; }
+    if ((ULONG_PTR)prop == 5 && h) { *(DWORD *)(h + 1) = xj_dead; return S_OK; }
+    return 0x80004001;
+}
+static HRESULT WINAPI xj_SetProperty(void *self, const GUID *prop, const XJ_PROPHDR *h) {
+    (void)self; if (!h) return E_POINTER;
+    int from = 0, to = 2;
+    if (h->dwHow == 1) { if (h->dwObj >= 8) return S_OK; from = h->dwObj / 4; to = from + 1; }
+    for (int a = from; a < to; a++) {
+        if ((ULONG_PTR)prop == 4) { const LONG *r = (const LONG *)(h + 1); xj_min[a] = r[0]; xj_max[a] = r[1]; }
+        else if ((ULONG_PTR)prop == 5) xj_dead = *(const DWORD *)(h + 1);
+    }
+    return S_OK;
+}
+static HRESULT WINAPI xj_Ok0(void *self) { (void)self; return S_OK; }
+static HRESULT WINAPI xj_Ok1(void *self, void *a) { (void)self; (void)a; return S_OK; }
+static HRESULT WINAPI xj_Ok2(void *self, void *a, DWORD b) { (void)self; (void)a; (void)b; return S_OK; }
+static LONG xj_axis(int a, double v) {   // -1..1 -> o alcance que o jogo pediu (SetProperty)
+    double f = (v + 1.0) / 2.0;
+    return xj_min[a] + (LONG)((xj_max[a] - xj_min[a]) * f + 0.5);
+}
+static HRESULT WINAPI xj_GetDeviceState(void *self, DWORD size, void *data) {
+    (void)self;
+    if (size != 80 || !data) return 0x80070057;
+    memset(data, 0, size);
+    LONG *ax = (LONG *)data; DWORD *pov = (DWORD *)((BYTE *)data + 32); BYTE *bt = (BYTE *)data + 48;
+    pov[0] = pov[1] = pov[2] = pov[3] = 0xFFFFFFFF;
+    XSTATE st;
+    if (!xj_pad(&st)) { ax[0] = xj_axis(0, 0); ax[1] = xj_axis(1, 0); return S_OK; }
+    static int logged; if (!logged++) logf_("joystick analogico: lendo o controle XInput %d (alcance %ld..%ld; zona morta %d%%, inicio %d%%, maximo %d%%/%d%%)", xj_port, xj_min[0], xj_max[0], aj.dead, aj.start, aj.outer, aj.outer_r);
+    XPAD *p = &st.Gamepad;
+    double x, y;   // a zona morta do jogo (xj_dead) fica de fora: a do mod já é redonda e mais curta
+    stick_shape(p->sThumbLX / 32767.0, p->sThumbLY / 32767.0, aj.dead, aj.start, aj.outer, &x, &y);
+    ax[0] = xj_axis(0, x); ax[1] = xj_axis(1, -y);           // DirectInput: para cima = valores menores
+    WORD b = p->wButtons;
+    if (cfg.swap_ab) { WORD a = b & XB_A, bb = b & XB_B; b &= ~(XB_A | XB_B); if (a) b |= XB_B; if (bb) b |= XB_A; }
+    if (b & XB_A)  bt[0] = 0x80;
+    if (b & XB_X)  bt[1] = 0x80;
+    if (b & XB_B)  bt[2] = 0x80;
+    if (b & XB_LB) bt[3] = 0x80;
+    if (b & XB_RB) bt[4] = 0x80;
+    if (b & XB_Y)  bt[5] = 0x80;
+    int caml = 0, camr = 0;
+    { int lt = p->bLeftTrigger > 60, rt = p->bRightTrigger > 60; if (cfg.inv_trig) { int t = lt; lt = rt; rt = t; } caml |= lt; camr |= rt; }
+    if (aj.partner) {   // analógico direito -> analógico direito do PS1 (o amigo); a câmera fica no LT/RT
+        double rx, ry;
+        stick_shape(p->sThumbRX / 32767.0, p->sThumbRY / 32767.0, aj.dead, aj.start, aj.outer_r, &rx, &ry);
+        bbfix_rx = stick_ps1(rx); bbfix_ry = stick_ps1(-ry);   // PS1: para cima = 0
+        static unsigned char lx = 0x7f, ly = 0x7f; static int nl;
+        if (cfg.debug && (abs(bbfix_rx - lx) > 60 || abs(bbfix_ry - ly) > 60) && nl++ < 20) { lx = bbfix_rx; ly = bbfix_ry; logf_("analogico direito -> pacote PS1: %d %d", bbfix_rx, bbfix_ry); }
+    } else if (cfg.cam_stick) { int sl = p->sThumbRX < -16000, sr = p->sThumbRX > 16000; if (cfg.inv_stick) { int t = sl; sl = sr; sr = t; } caml |= sl; camr |= sr; }
+    if (b & XB_RS) caml = camr = 1;
+    if (caml) bt[6] = 0x80;
+    if (camr) bt[7] = 0x80;
+    return S_OK;
+}
+static HRESULT WINAPI xj_GetDeviceData(void *self, DWORD o, void *d, DWORD *io, DWORD f) { (void)self; (void)o; (void)d; (void)f; if (io) *io = 0; return S_OK; }
+static HRESULT WINAPI xj_GetObjectInfo(void *self, void *i, DWORD o, DWORD h) { (void)self; (void)i; (void)o; (void)h; return 0x80004001; }
+static HRESULT WINAPI xj_GetDeviceInfo(void *self, XJ_DEVINST *d) { (void)self; if (!d) return E_POINTER; xj_info(d, d->dwSize ? d->dwSize : sizeof *d); return S_OK; }
+static HRESULT WINAPI xj_RunControlPanel(void *self, HWND w, DWORD f) { (void)self; (void)w; (void)f; return S_OK; }
+static HRESULT WINAPI xj_Initialize(void *self, HINSTANCE h, DWORD v, REFGUID g) { (void)self; (void)h; (void)v; (void)g; return S_OK; }
+static HRESULT WINAPI xj_CreateEffect(void *self, REFGUID g, const void *e, void **o, void *u) { (void)self; (void)g; (void)e; (void)u; if (o) *o = NULL; return 0x80040201; }
+static HRESULT WINAPI xj_EnumEffects(void *self, void *cb, void *ref, DWORD t) { (void)self; (void)cb; (void)ref; (void)t; return S_OK; }
+static HRESULT WINAPI xj_GetEffectInfo(void *self, void *i, REFGUID g) { (void)self; (void)i; (void)g; return 0x80040201; }
+static HRESULT WINAPI xj_GetFFState(void *self, DWORD *o) { (void)self; (void)o; return 0x80040201; }
+static HRESULT WINAPI xj_SendFFCommand(void *self, DWORD f) { (void)self; (void)f; return 0x80040201; }
+static HRESULT WINAPI xj_EnumCreated(void *self, void *cb, void *ref, DWORD f) { (void)self; (void)cb; (void)ref; (void)f; return S_OK; }
+static HRESULT WINAPI xj_Escape(void *self, void *e) { (void)self; (void)e; return 0x80040201; }
+static HRESULT WINAPI xj_SendDeviceData(void *self, DWORD s, const void *d, DWORD *io, DWORD f) { (void)self; (void)s; (void)d; (void)io; (void)f; return 0x80040201; }
+static void *xj_vtbl[] = {
+    (void *)xj_QueryInterface, (void *)xj_AddRef, (void *)xj_Release, (void *)xj_GetCapabilities, (void *)xj_EnumObjects,
+    (void *)xj_GetProperty, (void *)xj_SetProperty, (void *)xj_Ok0 /* Acquire */, (void *)xj_Ok0 /* Unacquire */,
+    (void *)xj_GetDeviceState, (void *)xj_GetDeviceData, (void *)xj_Ok1 /* SetDataFormat */, (void *)xj_Ok1 /* SetEventNotification */,
+    (void *)xj_Ok2 /* SetCooperativeLevel */, (void *)xj_GetObjectInfo, (void *)xj_GetDeviceInfo, (void *)xj_RunControlPanel,
+    (void *)xj_Initialize, (void *)xj_CreateEffect, (void *)xj_EnumEffects, (void *)xj_GetEffectInfo, (void *)xj_GetFFState,
+    (void *)xj_SendFFCommand, (void *)xj_EnumCreated, (void *)xj_Escape, (void *)xj_Ok0 /* Poll */, (void *)xj_SendDeviceData,
+};
+
+// right_stick_partner: o código de joystick do jogo grava "centro" (0x7f) no analógico direito do pacote do PS1
+// (bytes 4/5, em 0x40e80a). Este trecho grava o analógico direito de verdade, e o código do PS1, que continua lá,
+// volta a mover o amigo com ele (o personagem que não está sendo controlado).
+__attribute__((naked, used)) void bbfix_rs_stub(void) {
+    __asm__ volatile(
+        "pushl %eax\n\t"
+        "movb _bbfix_rx, %al\n\t"
+        "movb %al, 4(%esi)\n\t"
+        "movb _bbfix_ry, %al\n\t"
+        "movb %al, 5(%esi)\n\t"
+        "popl %eax\n\t"
+        "ret\n\t");
+}
+static void patch_rs_partner(void) {   // mov [esi+4],al; mov [esi+5],al -> call bbfix_rs_stub; nop
+    char r[6]; DWORD rel = (DWORD)(ULONG_PTR)bbfix_rs_stub - (0x40e80a + 5);
+    r[0] = (char)0xE8; memcpy(r + 1, &rel, 4); r[5] = (char)0x90;
+    patch_bytes(0x40e80a, "\x88\x46\x04\x88\x46\x05", 6, r);
+}
+static HRESULT WINAPI h_DI_EnumDevices(void *self, DWORD type, XJ_ENUMCB cb, void *ref, DWORD flags) {
+    if (aj.on && cb && (type == 0 || type == 4)) {   // todos os dispositivos ou só joysticks
+        XSTATE st;
+        if (xj_pad(&st)) {
+            XJ_DEVINST d; xj_info(&d, sizeof d);
+            BOOL go = cb(&d, ref);
+            logf_("joystick analogico: oferecido ao jogo (XInput %d), jogo %s", xj_port, go ? "continua" : "escolheu");
+            if (!go) return S_OK;
+        } else logf_("joystick analogico: nenhum controle XInput conectado");
+    }
+    return r_DI_EnumDevices(self, type, cb, ref, flags);
+}
 static HRESULT WINAPI h_DI_CreateDevice(void *self, REFGUID g, void **dev, void *outer) {
+    if (aj.on && g && dev && IsEqualGUID(g, &k_xjoy_guid)) {
+        xj_obj = xj_vtbl; InterlockedIncrement(&xj_ref); *dev = &xj_obj; aj.live = 1;
+        logf_("joystick analogico: o jogo abriu o joystick (movimento analogico como no PS1)");
+        return 0;
+    }
     HRESULT r = r_DI_CreateDevice(self, g, dev, outer);
     if (r == 0 && dev && *dev && g && IsEqualGUID(g, &k_GUID_SysKeyboard)) {
         g_kbd = *dev;
@@ -3547,6 +3734,7 @@ static HRESULT WINAPI h_DI_CreateDevice(void *self, REFGUID g, void **dev, void 
 static void hook_dinput(void *di) {
     if (!di || !cfg.enabled) return;
     patch_vtbl(*(void ***)di, 3, (void *)h_DI_CreateDevice, (void **)&r_DI_CreateDevice);
+    if (aj.on) patch_vtbl(*(void ***)di, 4, (void *)h_DI_EnumDevices, (void **)&r_DI_EnumDevices);
 }
 
 
@@ -4165,8 +4353,14 @@ static void init(HMODULE self) {
     if (!r_GetProcAddress) r_GetProcAddress = GetProcAddress;
     if (!r_LoadLibraryA) r_LoadLibraryA = LoadLibraryA;
 
-    if (cfg.unlock_joy)  // jb 0x40f1a0 ("Joystick are not supported in WinNT") -> nops
+    if (cfg.unlock_joy || aj.on)  // jb 0x40f1a0 ("Joystick are not supported in WinNT") -> nops
         patch_bytes(0x40ef48, "\x0f\x82\x52\x02\x00\x00", 6, "\x90\x90\x90\x90\x90\x90");
+    if (aj.on) {
+        // o jogo também transforma o joystick em direcional (que faz correr), mas fora do centro: esquerda/cima
+        // abaixo de 0x10 (~88% do curso), direita/baixo acima de 0xc8 (~57%). Direita/baixo passam a 0xf0 (~88%).
+        patch_bytes(0x40e95c, "\xb9\xc8\x00\x00\x00", 5, "\xb9\xf0\x00\x00\x00");
+        if (aj.partner) patch_rs_partner();
+    }
 
     r_RegQueryValueExA = hook_iat(exe, "ADVAPI32.dll", "RegQueryValueExA", h_RegQueryValueExA);
     r_RegOpenKeyExA = hook_iat(exe, "ADVAPI32.dll", "RegOpenKeyExA", h_RegOpenKeyExA);
@@ -4184,7 +4378,7 @@ static void init(HMODULE self) {
     install_text_hook();
     if (cfg.hud_probe) install_op14_probe();
     load_keymap();
-    logf_("config: aspect=%d msaa=%d vsync=%d xinput=%d unlock_dinput_joystick=%d", cfg.aspect, cfg.msaa, cfg.vsync, cfg.xinput, cfg.unlock_joy);
+    logf_("config: aspect=%d msaa=%d vsync=%d xinput=%d unlock_dinput_joystick=%d analog_joystick=%d right_stick_partner=%d", cfg.aspect, cfg.msaa, cfg.vsync, cfg.xinput, cfg.unlock_joy, aj.on, aj.partner);
 }
 
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID r) {
