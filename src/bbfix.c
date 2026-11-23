@@ -27,7 +27,7 @@ static struct {
     int enabled, log_gl, aspect, msaa, vsync, xinput, unlock_joy, a_enter, deadzone, cam_stick, swap_ab, language, game_res, background, debug, inv_stick, inv_trig, draw_dist, ssaa, mipmaps, aniso, actor_dist, auto_quality, lod_dist, force_gl, dump_tex, hd_tex, pad_prompts, menu_fill, hires_menu, menu_pad, menu_hd, hud_probe, center_menus;
 } cfg = { 1, 1, 2, 4, 1, 1, 0, 1, 30, 1, 0, -1, 1, 1, 0, 1, 1, 400, 2, 1, 16, 200, 1, 400, 1, 0, 1, 2, 1, 1, 1, 1, 0, 1 };
 // pós-processamento [postfx]: valores em %
-static struct { int on, bloom, threshold, sharpen, saturation, contrast, vignette; } fx = { 1, 25, 70, 40, 110, 105, 20 };
+static struct { int on, bloom, threshold, sharpen, saturation, contrast, vignette, brightness; } fx = { 1, 25, 70, 40, 110, 105, 20, 100 };
 
 static char g_dir[MAX_PATH];
 static FILE *g_log;
@@ -96,9 +96,11 @@ static void load_config(void) {
     fx.saturation = ini_int("postfx", "saturation", 110);
     fx.contrast   = ini_int("postfx", "contrast", 105);
     fx.vignette   = ini_int("postfx", "vignette", 20);
+    fx.brightness = ini_int("postfx", "brightness", 100);
     #define CLAMP_(v, a, b) do { if ((v) < (a)) (v) = (a); if ((v) > (b)) (v) = (b); } while (0)
     CLAMP_(fx.bloom, 0, 100); CLAMP_(fx.threshold, 0, 100); CLAMP_(fx.sharpen, 0, 100);
     CLAMP_(fx.saturation, 0, 200); CLAMP_(fx.contrast, 50, 150); CLAMP_(fx.vignette, 0, 100);
+    CLAMP_(fx.brightness, 50, 200);
     if (cfg.draw_dist < 50) cfg.draw_dist = 50;
     if (cfg.draw_dist > 400) cfg.draw_dist = 400;
 }
@@ -545,7 +547,7 @@ static const char *fx_fs_blur =                    // gaussiana de 9 amostras em
 static const char *fx_fs_final =
     "#version 110\n"
     "uniform sampler2D tex; uniform sampler2D btex; uniform vec2 px;\n"
-    "uniform float sharp, bloom, con, sat, vig; varying vec2 uv;\n"
+    "uniform float sharp, bloom, con, sat, vig, gam; varying vec2 uv;\n"
     "vec3 T(float x, float y) { return texture2D(tex, uv + px * vec2(x, y)).rgb; }\n"
     "void main() {\n"
     "  vec3 e = T(0.0, 0.0), c = e;\n"
@@ -559,6 +561,7 @@ static const char *fx_fs_final =
     "    c = clamp(((b + d + f + h) * w + e) / (1.0 + 4.0 * w), 0.0, 1.0);\n"
     "  }\n"
     "  c += bloom * texture2D(btex, uv).rgb;\n"
+    "  c = pow(clamp(c, 0.0, 1.0), vec3(gam));\n"            // brilho: gama, clareia os tons médios sem estourar o branco
     "  c = (c - 0.5) * con + 0.5;\n"
     "  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));\n"
     "  c = mix(vec3(l), c, sat);\n"
@@ -694,6 +697,7 @@ static void fx_run(void) {
     U2(P, "px", 1.0 / sw, 1.0 / sh);
     U1(P, "sharp", on ? fx.sharpen / 100.0 : 0); U1(P, "bloom", on ? fx.bloom / 100.0 : 0);
     U1(P, "con", on ? fx.contrast / 100.0 : 1); U1(P, "sat", on ? fx.saturation / 100.0 : 1); U1(P, "vig", on ? fx.vignette / 100.0 : 0);
+    U1(P, "gam", on ? 100.0 / fx.brightness : 1);
     fx_quad();
     y_UseProgram(0);
     y_ActiveTexture(GL_TEXTURE0_ + 1); glBindTexture(GL_TEXTURE_2D, (GLuint)tex1);
