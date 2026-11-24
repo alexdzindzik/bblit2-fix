@@ -12,9 +12,11 @@ gcc -std=c11 -O2 -Wall -Wextra -Wredundant-decls -o build/test_pad_icons tests/t
 build/test_pad_icons
 gcc -std=c11 -O2 -Wall -Wextra -Wredundant-decls -o build/test_menu_center tests/test_menu_center.c src/menu_center.c
 build/test_menu_center
+gcc -std=c11 -O2 -Wall -Wextra -Wredundant-decls -o build/test_stick_shape tests/test_stick_shape.c src/stick_shape.c -lm
+build/test_stick_shape
 i686-w64-mingw32-gcc -std=c11 -O2 -msse2 -mfpmath=sse -Wall -Wextra -Wredundant-decls -Wno-unused-parameter -Wno-cast-function-type -Wno-misleading-indentation \
     -shared -static-libgcc -Wl,--enable-stdcall-fixup \
-    -o build/dinput.dll src/bbfix.c src/hud_math.c src/pad_cursor.c src/pad_icons.c src/menu_center.c src/dinput.def -lopengl32 -lgdi32 -luser32 -ladvapi32
+    -o build/dinput.dll src/bbfix.c src/hud_math.c src/pad_cursor.c src/pad_icons.c src/menu_center.c src/stick_shape.c src/dinput.def -lopengl32 -lgdi32 -luser32 -ladvapi32
 i686-w64-mingw32-strip build/dinput.dll
 cp dist/bblit2fix.ini build/
 ls -la build/
