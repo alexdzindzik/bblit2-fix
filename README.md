@@ -14,7 +14,7 @@ Teaser de 55 segundos no YouTube: menus em 16:9, antes e depois com zoom nas bor
 
 ## Antes e depois
 
-Capturas no próprio jogo, em 2560×1440 (v0.9 a v0.12).
+Capturas no próprio jogo, em 2560×1440 (v0.9 a v0.13).
 
 | | Antes | Depois |
 |---|---|---|
@@ -23,6 +23,7 @@ Capturas no próprio jogo, em 2560×1440 (v0.9 a v0.12).
 | **Efeitos de imagem** (mesmo quadro) | ![sem efeitos](docs/efeitos_antes.jpg) | ![com efeitos](docs/efeitos_depois.jpg) |
 | **Itens surgindo do nada** (mesmo lugar; o item azul à esquerda) | ![distância original](docs/objetos_original.jpg) | ![distância do mod](docs/objetos_mod.jpg) |
 | **HUD no widescreen** (ícones 3D x contadores) | ![HUD antes](docs/hud_antes.jpg) | ![HUD depois](docs/hud_depois.jpg) |
+| **HUD da fase** (v0.13: pacote HD e sombra suave) | ![HUD no xBR](docs/hud_hd_antes.jpg) | ![HUD em HD com sombra](docs/hud_hd_depois.jpg) |
 
 Resumo em imagens: [`docs/comparacao_v010.png`](docs/comparacao_v010.png) e [`docs/comparacao_v09.png`](docs/comparacao_v09.png). O histórico de versões está em [`CHANGELOG.md`](CHANGELOG.md).
 
