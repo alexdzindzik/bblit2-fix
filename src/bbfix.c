@@ -20,13 +20,15 @@
 #include "pad_icons.h"
 #include "menu_center.h"
 #include "stick_shape.h"
+#include "glrec.h"
+#include "pacer.h"
 
 #define FIX_VERSION "0.13.1"
 
 // ---------------------------------------------------------------- config / log
 static struct {
-    int enabled, log_gl, aspect, msaa, vsync, xinput, unlock_joy, a_enter, deadzone, cam_stick, swap_ab, language, game_res, background, debug, inv_stick, inv_trig, draw_dist, ssaa, mipmaps, aniso, actor_dist, auto_quality, lod_dist, force_gl, dump_tex, hd_tex, pad_prompts, menu_fill, hires_menu, menu_pad, menu_hd, hud_probe, center_menus, hud_hd, hud_shadow;
-} cfg = { 1, 1, 2, 4, 1, 1, 0, 1, 30, 1, 0, -1, 1, 1, 0, 1, 1, 400, 2, 1, 16, 200, 1, 400, 1, 0, 1, 2, 1, 1, 1, 1, 0, 1, 1, 45 };
+    int enabled, log_gl, aspect, msaa, vsync, xinput, unlock_joy, a_enter, deadzone, cam_stick, swap_ab, language, game_res, background, debug, inv_stick, inv_trig, draw_dist, ssaa, mipmaps, aniso, actor_dist, auto_quality, lod_dist, force_gl, dump_tex, hd_tex, pad_prompts, menu_fill, hires_menu, menu_pad, menu_hd, hud_probe, center_menus, hud_hd, hud_shadow, fps;
+} cfg = { 1, 1, 2, 4, 1, 1, 0, 1, 30, 1, 0, -1, 1, 1, 0, 1, 1, 400, 2, 1, 16, 200, 1, 400, 1, 0, 1, 2, 1, 1, 1, 1, 0, 1, 1, 45, 30 };
 // joystick analógico [pad]: o controle XInput oferecido ao jogo como joystick do DirectInput (live = o jogo abriu)
 static struct { int on, partner, dead, start, outer, outer_r, live; } aj = { 0, 0, 10, 20, 95, 90, 0 };
 // analógico direito no pacote do PS1 (bytes 4/5), escrito por xj_GetDeviceState e lido pelo bbfix_rs_stub
@@ -59,6 +61,7 @@ static void load_config(void) {
     cfg.aspect    = ini_int("video", "aspect", 2);
     cfg.msaa      = ini_int("video", "msaa", 4);
     cfg.vsync     = ini_int("video", "vsync", 1);
+    cfg.fps       = ini_int("video", "fps", 30);
     cfg.xinput    = ini_int("pad", "xinput", 1);
     cfg.unlock_joy= ini_int("pad", "unlock_dinput_joystick", 0);
     cfg.a_enter   = ini_int("pad", "a_is_enter", 1);
@@ -294,6 +297,56 @@ static PFN_wglGetProc r_wglGetProcAddress;
 
 static int n_vp, n_sc, n_or, n_fr, n_lm, n_rp, n_ct, n_dp;
 static GLenum g_mode = GL_MODELVIEW;
+static void fp_add(int type, int mode, DWORD ptr, DWORD ret, const float *f, int nf);
+enum { FP_ORTHO_ = 4, FP_VIEWPORT_ = 5, FP_CLEAR_ = 6, FP_ENABLE_ = 8, FP_DISABLE_ = 9 };   // = FP_* da medição dos 60 fps
+// ---------------------------------------------------------------- 60 fps (etapa 1): instantâneo do desenho do tick
+// Com [video] fps > 30, os ganchos gravam cada comando de desenho do jogo (argumentos crus, antes das camadas do mod).
+// Na espera do jogo, o instantâneo é repetido pelos mesmos ganchos nos quadros extras (Task 4). fps=30: nada disso roda.
+#define REC_CAP 100000   // comandos por tick (a medição deu até ~10 000)
+static GR_SNAP g_rec, g_show;   // g_rec = sendo gravado; g_show = o tick completo que os quadros extras repetem
+static int g_rec_on, g_replaying, g_rec_ok, g_rec_bad;   // gravando; repetindo agora; instantâneo pronto; invalidado
+static void rec(unsigned op, unsigned u0, unsigned u1, unsigned u2, const double *d, int nd) {
+    if (!g_rec_on || g_replaying) return;
+    unsigned u[3] = { u0, u1, u2 };
+    gr_put(&g_rec, op, u, 3, d, nd);
+}
+static void rec_tc(double s0, double t0, double r0, double q0) { double d[4] = { s0, t0, r0, q0 }; rec(GR_TEXCOORD, 0, 0, 0, d, 4); }
+static void rec_col(double r, double g, double b, double a) { double d[4] = { r, g, b, a }; rec(GR_COLOR, 0, 0, 0, d, 4); }
+static void rec_vtx(const void *p, double x, double y, double z, double w) { double d[4] = { x, y, z, w }; rec(GR_VERTEX, (unsigned)(ULONG_PTR)p, 0, 0, d, 4); }
+static void rec_invalidate(void) { g_rec_bad = 1; g_rec_ok = 0; }
+static void rec_init(void) {
+    { DEVMODEA dm; memset(&dm, 0, sizeof dm); dm.dmSize = sizeof dm;
+      if (EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &dm)) logf_("monitor: %lux%lu a %lu Hz", dm.dmPelsWidth, dm.dmPelsHeight, dm.dmDisplayFrequency); }
+    if (cfg.fps != 30 && cfg.fps != 60 && cfg.fps != 120 && cfg.fps != 144) { logf_("fps=%d nao suportado: usando 30", cfg.fps); cfg.fps = 30; }
+    if (cfg.fps <= 30) return;
+    GR_CMD *b = malloc(sizeof(GR_CMD) * REC_CAP * 2);
+    if (!b) { logf_("fps=%d: sem memoria para o instantaneo, usando 30", cfg.fps); cfg.fps = 30; return; }
+    gr_init(&g_rec, b, REC_CAP); gr_init(&g_show, b + REC_CAP, REC_CAP); g_rec_on = 1;
+    logf_("fps=%d: gravando o desenho de cada tick para os quadros extras", cfg.fps);
+}
+// começo do instantâneo (fim do after_swap): estado inicial lido do OpenGL, para a repetição começar igual
+static void rec_start(void) {
+    if (!g_rec_on) return;
+    gr_reset(&g_rec);
+    static const GLenum caps[] = { GL_BLEND, GL_DEPTH_TEST, GL_ALPHA_TEST, GL_TEXTURE_2D, GL_CULL_FACE, GL_SCISSOR_TEST };
+    for (size_t i = 0; i < sizeof caps / sizeof *caps; i++) rec(glIsEnabled(caps[i]) ? GR_ENABLE : GR_DISABLE, caps[i], 0, 0, NULL, 0);
+    GLint v[4] = { 0 }, w = 0; GLfloat f = 0; double d[4];
+    glGetIntegerv(GL_BLEND_SRC, v); glGetIntegerv(GL_BLEND_DST, v + 1); rec(GR_BLENDFUNC, (unsigned)v[0], (unsigned)v[1], 0, NULL, 0);
+    glGetIntegerv(GL_ALPHA_TEST_FUNC, &w); glGetFloatv(GL_ALPHA_TEST_REF, &f); d[0] = f; rec(GR_ALPHAFUNC, (unsigned)w, 0, 0, d, 1);
+    glGetIntegerv(GL_DEPTH_FUNC, &w); rec(GR_DEPTHFUNC, (unsigned)w, 0, 0, NULL, 0);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &w); rec(GR_BIND, GL_TEXTURE_2D, (unsigned)w, 0, NULL, 0);
+    glGetIntegerv(GL_VIEWPORT, v); for (int i = 0; i < 4; i++) d[i] = v[i]; rec(GR_VIEWPORT | GR_RAW, 0, 0, 0, d, 4);
+    glGetIntegerv(GL_SCISSOR_BOX, v); for (int i = 0; i < 4; i++) d[i] = v[i]; rec(GR_SCISSOR | GR_RAW, 0, 0, 0, d, 4);
+    glGetIntegerv(GL_MATRIX_MODE, &w); rec(GR_MATRIXMODE, (unsigned)w, 0, 0, NULL, 0);
+}
+// fim do instantâneo (troca do jogo)
+static void rec_finish(void) {
+    if (!g_rec_on) return;
+    g_rec_ok = g_rec.n > 0 && !g_rec.overflow && !g_rec_bad;
+    GR_SNAP t = g_show; g_show = g_rec; g_rec = t;    // o tick gravado vai para a repetição; grava o próximo no outro
+    g_rec_bad = 0;
+    rec_start();
+}
 static int pr_proj;                                  // diagnóstico do HUD: última projeção (1 glOrtho, 2 glFrustum, 3 glLoadMatrix)
 static float g_ortho_h = 1440; static int g_ortho_up = 1;   // altura e sentido do último glOrtho (sombra do HUD)
 static void sh_reset(void);
@@ -304,20 +357,25 @@ static long g_frames;
 #define LOGN(counter, lim, ...) do { if (cfg.log_gl && (counter)++ < (lim)) logf_(__VA_ARGS__); } while (0)
 
 static void APIENTRY h_Viewport(GLint x, GLint y, GLsizei w, GLsizei h) {
+    { double d[4] = { x, y, w, h }; rec(GR_VIEWPORT, 0, 0, 0, d, 4); }
     update_rect();
     LOGN(n_vp, 40, "glViewport(%d,%d,%d,%d) jogo %dx%d janela %dx%d", x, y, w, h, g_gw, g_gh, g_winw, g_winh);
+    { float f[4] = { (float)x, (float)y, (float)w, (float)h }; fp_add(FP_VIEWPORT_, 0, 0, (DWORD)__builtin_return_address(0), f, 4); }
     map_rect(&x, &y, &w, &h); r_Viewport(x, y, w, h);
 }
 static void APIENTRY h_Scissor(GLint x, GLint y, GLsizei w, GLsizei h) {
+    { double d[4] = { x, y, w, h }; rec(GR_SCISSOR, 0, 0, 0, d, 4); }
     LOGN(n_sc, 20, "glScissor(%d,%d,%d,%d)", x, y, w, h);
     map_rect(&x, &y, &w, &h); r_Scissor(x, y, w, h);
 }
-static void APIENTRY h_Enable(GLenum c) { if (c == GL_SCISSOR_TEST) g_scissor_on = 1; r_Enable(c); }
-static void APIENTRY h_Disable(GLenum c) { if (c == GL_SCISSOR_TEST) g_scissor_on = 0; r_Disable(c); }
+static void APIENTRY h_Enable(GLenum c) { rec(GR_ENABLE, c, 0, 0, NULL, 0); fp_add(FP_ENABLE_, 0, c, (DWORD)__builtin_return_address(0), NULL, 0); if (c == GL_SCISSOR_TEST) g_scissor_on = 1; r_Enable(c); }
+static void APIENTRY h_Disable(GLenum c) { rec(GR_DISABLE, c, 0, 0, NULL, 0); fp_add(FP_DISABLE_, 0, c, (DWORD)__builtin_return_address(0), NULL, 0); if (c == GL_SCISSOR_TEST) g_scissor_on = 0; r_Disable(c); }
 static void APIENTRY h_Ortho(GLdouble l, GLdouble r, GLdouble b, GLdouble t, GLdouble n, GLdouble f) {
     pr_proj = 1;
+    { double d[6] = { l, r, b, t, n, f }; rec(GR_ORTHO, 0, 0, 0, d, 6); }
     if (t != b) { g_ortho_h = (float)fabs(t - b); g_ortho_up = t > b; }
     LOGN(n_or, 30, "glOrtho(%g,%g,%g,%g,%g,%g) modo %04x", l, r, b, t, n, f, g_mode);
+    { float fv[6] = { (float)l, (float)r, (float)b, (float)t, (float)n, (float)f }; fp_add(FP_ORTHO_, 0, 0, (DWORD)__builtin_return_address(0), fv, 6); }
     r_Ortho(l, r, b, t, n, f);
 }
 static void APIENTRY h_Frustum(GLdouble l, GLdouble r, GLdouble b, GLdouble t, GLdouble n, GLdouble f) {
@@ -325,8 +383,10 @@ static void APIENTRY h_Frustum(GLdouble l, GLdouble r, GLdouble b, GLdouble t, G
     LOGN(n_fr, 30, "glFrustum(%g,%g,%g,%g,%g,%g) aspecto %.3f", l, r, b, t, n, f, (r - l) / (t - b));
     r_Frustum(l, r, b, t, n, f);
 }
-static void APIENTRY h_MatrixMode(GLenum m) { g_mode = m; r_MatrixMode(m); }
+static void APIENTRY h_MatrixMode(GLenum m) { rec(GR_MATRIXMODE, m, 0, 0, NULL, 0); g_mode = m; r_MatrixMode(m); }
+static void rec_no_matrix(void) { static int n; if (g_rec_on && !g_replaying && !n++) logf_("fps: o jogo chamou glLoadMatrix (nao gravado nos quadros extras)"); }
 static void APIENTRY h_LoadMatrixf(const GLfloat *m) {
+    rec_no_matrix();
     if (g_mode == GL_PROJECTION) pr_proj = 3;
     if (g_mode == GL_PROJECTION)
         LOGN(n_lm, 30, "glLoadMatrixf(PROJ) %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g",
@@ -334,11 +394,12 @@ static void APIENTRY h_LoadMatrixf(const GLfloat *m) {
     r_LoadMatrixf(m);
 }
 static void APIENTRY h_LoadMatrixd(const GLdouble *m) {
+    rec_no_matrix();
     if (g_mode == GL_PROJECTION)
         LOGN(n_lm, 30, "glLoadMatrixd(PROJ) %g %g %g %g | %g %g %g %g", m[0], m[4], m[8], m[12], m[1], m[5], m[9], m[13]);
     r_LoadMatrixd(m);
 }
-static void APIENTRY h_Clear(GLbitfield mask) { r_Clear(mask); }
+static void APIENTRY h_Clear(GLbitfield mask) { rec(GR_CLEAR, mask, 0, 0, NULL, 0); fp_add(FP_CLEAR_, 0, mask, (DWORD)__builtin_return_address(0), NULL, 0); r_Clear(mask); }
 static void APIENTRY h_ReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum t, void *p) {
     LOGN(n_rp, 20, "glReadPixels(%d,%d,%d,%d)", x, y, w, h);
     r_ReadPixels(x, y, w, h, f, t, p);
@@ -362,14 +423,13 @@ static HGLRC g_fbo_rc; static int g_fbo_ok;
 static void fbo_setup(HGLRC rc);
 static volatile LONG g_kr, g_klod;
 static void debug_keys(void);
+static void fp_frame_end(void);
 static void icons_sync(void);
 static void hd_reset(void);
 static HGLRC g_hd_rc;                               // contexto dono das texturas marcadas como HD
 static void mc_frame_end(void);
-static void after_swap(void) {
-    g_frames++;
-    pr_tick(); sh_tick();
-    mc_frame_end();
+// limpa as barras laterais para o próximo quadro (o jogo pode não limpar a cor)
+static void clear_bars(void) {
     if (scaling_active() && r_Clear && r_Scissor && (g_vx > 0 || g_vy > 0)) {
         // limpa as barras para o próximo quadro (o jogo pode não limpar a cor)
         int S = g_S;
@@ -387,6 +447,12 @@ static void after_swap(void) {
         glClearColor(cc[0], cc[1], cc[2], cc[3]);
         if (on) r_Enable(GL_SCISSOR_TEST); else r_Disable(GL_SCISSOR_TEST);
     }
+}
+static void after_swap(void) {
+    g_frames++;
+    pr_tick(); sh_tick(); fp_frame_end();
+    mc_frame_end();
+    clear_bars();
     static DWORD t0, a0; static long f0, af0; static int slow; DWORD now = GetTickCount();
     if (!t0) { t0 = a0 = now; f0 = af0 = g_frames; }
     if (now - t0 >= 10000) { logf_("fps: %.1f (jogo %dx%d, janela %dx%d, interno x%d)", (g_frames - f0) * 1000.0 / (now - t0), g_gw, g_gh, g_winw, g_winh, g_S); t0 = now; f0 = g_frames; }
@@ -406,6 +472,7 @@ static void after_swap(void) {
     }
     icons_sync();
     if (cfg.debug) debug_keys();
+    rec_finish();
 }
 
 // ---- framebuffer interno: MSAA + supersampling sem mexer no formato de pixel da janela
@@ -803,6 +870,9 @@ static void fbo_rebind(void) {
 
 // F12: captura da tela do jogo na resolução da janela, sem perdas (bin\capturas\*.bmp). Lê a imagem final
 // (depois do antisserrilhado e dos efeitos), antes da troca de buffers.
+static void shot_save(const char *suffix);
+static int g_shot_r;                 // debug com fps > 30: salvar também o próximo quadro extra (..._r.bmp)
+static char g_shot_base[MAX_PATH];   // nome da última captura do quadro do jogo, sem ".bmp"
 static void shot_check(void) {
     static int prev;
     int down = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
@@ -811,6 +881,12 @@ static void shot_check(void) {
     DWORD pid = 0; HWND fg = GetForegroundWindow();             // só com o jogo em foco (F12 em outro programa não conta)
     if (fg) GetWindowThreadProcessId(fg, &pid);
     if (pid != GetCurrentProcessId()) return;
+    shot_save("");
+    if (cfg.debug && g_rec_on) g_shot_r = 1;
+}
+// salva a imagem final (depois do antisserrilhado e dos efeitos); suffix "" = quadro do jogo, "_r" = quadro extra
+static void shot_save(const char *suffix) {
+    if (!g_gl_on || g_winw <= 0 || g_winh <= 0) return;
     int w = g_winw, h = g_winh, stride = (w * 3 + 3) & ~3;
     BYTE *px = malloc((size_t)stride * h);
     if (!px) return;
@@ -823,8 +899,12 @@ static void shot_check(void) {
     if (x_BindFramebuffer) x_BindFramebuffer(GL_READ_FRAMEBUFFER_EXT, (GLuint)rfb);
     char dir[MAX_PATH], path[MAX_PATH];
     snprintf(dir, sizeof dir, "%s\\capturas", g_dir); CreateDirectoryA(dir, NULL);
-    SYSTEMTIME st; GetLocalTime(&st);
-    snprintf(path, sizeof path, "%s\\bblit2_%04d%02d%02d_%02d%02d%02d_%03d.bmp", dir, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    if (*suffix) snprintf(path, sizeof path, "%s%s.bmp", g_shot_base, suffix);
+    else {
+        SYSTEMTIME st; GetLocalTime(&st);
+        snprintf(g_shot_base, sizeof g_shot_base, "%s\\bblit2_%04d%02d%02d_%02d%02d%02d_%03d", dir, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+        snprintf(path, sizeof path, "%s.bmp", g_shot_base);
+    }
     FILE *f = fopen(path, "wb");
     if (f) {
         BITMAPFILEHEADER fh = { 0x4d42, 0, 0, 0, sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) };
@@ -833,7 +913,7 @@ static void shot_check(void) {
         fwrite(&fh, sizeof fh, 1, f); fwrite(&ih, sizeof ih, 1, f); fwrite(px, 1, (size_t)stride * h, f); fclose(f);
         logf_("captura: %s (%dx%d)", path, w, h);
     }
-    if (cfg.debug && w >= 640 && h >= 360) {           // debug: cópia pequena (640x360) com nome fixo, para conferir rápido
+    if (cfg.debug && !*suffix && w >= 640 && h >= 360) {   // debug: cópia pequena (640x360) com nome fixo, para conferir rápido
         int sw = 640, sh = 360, ss = sw * 3;
         BYTE *sp = malloc((size_t)ss * sh);
         if (sp) {
@@ -854,8 +934,9 @@ static void shot_check(void) {
     }
     free(px);
 }
-static BOOL WINAPI h_wglSwapBuffers(HDC dc) { fbo_present(); shot_check(); BOOL r = r_wglSwapBuffers(dc); fbo_rebind(); after_swap(); return r; }
-static BOOL WINAPI h_SwapBuffersGdi(HDC dc) { fbo_present(); shot_check(); BOOL r = r_SwapBuffersGdi(dc); fbo_rebind(); after_swap(); return r; }
+static HDC g_swap_dc; static int g_swap_gdi;   // última troca do jogo (os quadros extras trocam do mesmo jeito)
+static BOOL WINAPI h_wglSwapBuffers(HDC dc) { g_swap_dc = dc; g_swap_gdi = 0; fbo_present(); shot_check(); BOOL r = r_wglSwapBuffers(dc); fbo_rebind(); after_swap(); return r; }
+static BOOL WINAPI h_SwapBuffersGdi(HDC dc) { g_swap_dc = dc; g_swap_gdi = 1; fbo_present(); shot_check(); BOOL r = r_SwapBuffersGdi(dc); fbo_rebind(); after_swap(); return r; }
 
 // ----- MSAA: escolhe um formato multisample via WGL_ARB_pixel_format com um contexto temporário
 #define WGL_DRAW_TO_WINDOW_ARB 0x2001
@@ -948,6 +1029,7 @@ static int WINAPI h_DescribePF_wgl(HDC dc, int pf, UINT n, PIXELFORMATDESCRIPTOR
 typedef BOOL (WINAPI *PFN_wglDel)(HGLRC);
 static PFN_wglDel r_wglDeleteContext;
 static BOOL WINAPI h_wglDeleteContext(HGLRC rc) {
+    rec_invalidate();
     if (rc && rc == g_hd_rc) { hd_reset(); sh_reset(); g_hd_rc = NULL; }   // nomes de textura valem por contexto
     if (rc && rc == g_fbo_rc) {
         if (wglGetCurrentContext() == rc) fbo_free();
@@ -1739,6 +1821,7 @@ static void hd_forget_bound(void) {
 typedef void (APIENTRY *PFN_DelTex)(GLsizei, const GLuint *);
 static PFN_DelTex r_DeleteTextures;
 static void APIENTRY h_DeleteTextures(GLsizei n, const GLuint *t) {
+    rec_invalidate();
     if (t && (g_hd_names_n || g_swap_n || g_sh_n)) {
         int was = 0;
         for (GLsizei i = 0; i < n; i++) { was += hd_is(t[i]); hd_mark(t[i], 0); swap_forget(t[i]); sh_forget(t[i]); }
@@ -1991,9 +2074,70 @@ static void sh_batch(void) {
         hud_on_quad(sh_tex, v, q[0].z, q[0].a);
     }
 }
-static void APIENTRY h_BindTexture(GLenum t, GLuint n) { if (t == GL_TEXTURE_2D) { pr_tex = n; pr_kind = hud_tex_kind(n); } r_BindTexture(t, n); }
+// ---------------------------------------------------------------- medição para os 60 fps ([fix] debug=1, F5)
+// Estudo (não vai para a versão normal): grava FP_FRAMES quadros seguidos de todas as chamadas de desenho do jogo,
+// com o ponteiro que o jogo passa ao glVertex3fv, coordenadas de textura (s, t, q), cor, textura, modo e o endereço
+// de quem chamou, em bin\fps_probe_N.bin. Serve para ver se dá para casar cada vértice entre dois ticks.
+#define FP_FRAMES 6
+#define FP_MAX (FP_FRAMES * 150000)
+enum { FP_VTX = 1, FP_BEGIN, FP_END, FP_ORTHO, FP_VIEWPORT, FP_CLEAR, FP_BIND, FP_ENABLE, FP_DISABLE, FP_SWAP };
+#pragma pack(push, 1)
+typedef struct { unsigned char type, mode; unsigned short tex; DWORD frame, ptr, ret; float f[8]; DWORD rgb; } FP_REC;
+#pragma pack(pop)
+static FP_REC *fp_buf;
+static int fp_n, fp_state, fp_frame, fp_lost;           // fp_state: 0 parado, 1 armado (F5), 2 gravando
+static float fp_q = 1;
+static void fp_add(int type, int mode, DWORD ptr, DWORD ret, const float *f, int nf) {
+    if (fp_state != 2 || g_replaying) return;          // só o desenho do jogo, não os quadros extras
+    if (fp_n >= FP_MAX) { fp_lost++; return; }
+    FP_REC *r = &fp_buf[fp_n++];
+    memset(r, 0, sizeof *r);
+    r->type = (unsigned char)type; r->mode = (unsigned char)mode; r->tex = (unsigned short)pr_tex; r->frame = (DWORD)fp_frame;
+    r->ptr = ptr; r->ret = ret;
+    for (int i = 0; i < nf && i < 8; i++) r->f[i] = f[i];
+    int c[3];
+    for (int i = 0; i < 3; i++) { float v = pr_col[i] * 255.f + .5f; c[i] = v < 0 ? 0 : v > 255 ? 255 : (int)v; }
+    r->rgb = (DWORD)c[0] | (DWORD)c[1] << 8 | (DWORD)c[2] << 16;
+}
+static void fp_vtx(const GLfloat *p, float x, float y, float z, void *ret) {
+    if (fp_state != 2) return;
+    float f[6] = { x, y, z, pr_cur_tc[0], pr_cur_tc[1], fp_q };
+    fp_add(FP_VTX, 0, (DWORD)p, (DWORD)ret, f, 6);
+}
+static void fp_write(void) {
+    char path[MAX_PATH]; int k = 1;
+    for (; k < 100; k++) {
+        snprintf(path, sizeof path, "%s\\fps_probe_%d.bin", g_dir, k);
+        if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) break;
+    }
+    FILE *f = fopen(path, "wb");
+    if (!f) { logf_("F5: nao consegui gravar %s", path); return; }
+    DWORD hdr[10] = { 0x31535046 /* FPS1 */, 1, (DWORD)fp_n, sizeof(FP_REC), FP_FRAMES, (DWORD)g_gw, (DWORD)g_gh, (DWORD)g_winw, (DWORD)g_winh, (DWORD)fp_lost };
+    fwrite(hdr, sizeof hdr, 1, f);
+    fwrite(fp_buf, sizeof(FP_REC), (size_t)fp_n, f);
+    fclose(f);
+    logf_("F5: medicao dos 60 fps gravada em %s (%d quadros, %d registros, %d perdidos)", path, FP_FRAMES, fp_n, fp_lost);
+}
+static void fp_frame_end(void) {
+    if (fp_state == 1) {                                 // começa no próximo quadro inteiro
+        if (!fp_buf) fp_buf = malloc(sizeof(FP_REC) * (size_t)FP_MAX);
+        if (!fp_buf) { fp_state = 0; logf_("F5: sem memoria para a medicao"); return; }
+        fp_n = fp_frame = fp_lost = 0; fp_state = 2;
+        logf_("F5: medicao dos 60 fps: gravando %d quadros", FP_FRAMES);
+        return;
+    }
+    if (fp_state != 2) return;
+    LARGE_INTEGER t; QueryPerformanceCounter(&t);
+    float f[4]; memcpy(f, &t, 8);
+    LARGE_INTEGER fq; QueryPerformanceFrequency(&fq); memcpy(f + 2, &fq, 8);
+    fp_add(FP_SWAP, 0, *(volatile DWORD *)0x4d0708, *(volatile DWORD *)0x4d0710, f, 4);   // contadores de quadros e de pulos do jogo
+    if (++fp_frame >= FP_FRAMES) { fp_state = 0; fp_write(); }
+}
+static void APIENTRY h_BindTexture(GLenum t, GLuint n) { rec(GR_BIND, t, n, 0, NULL, 0); if (t == GL_TEXTURE_2D) { pr_tex = n; pr_kind = hud_tex_kind(n); fp_add(FP_BIND, 0, n, (DWORD)__builtin_return_address(0), NULL, 0); } r_BindTexture(t, n); }
 static void APIENTRY h_Begin(GLenum m) {
+    rec(GR_BEGIN, m, 0, 0, NULL, 0);
     pr_count(PR_BEGIN); pr_in = 1; pr_mode = (int)m; pr_nv = 0;
+    fp_add(FP_BEGIN, (int)m, 0, (DWORD)__builtin_return_address(0), NULL, 0);
     if (sh_wants(m)) {                              // guarda em vez de começar: a sombra vai antes
         sh_cap = 1; sh_mode = m; sh_n = 0; sh_tex = pr_tex;
         return;
@@ -2017,6 +2161,8 @@ static void pr_dump_batch(void) {
     nl++;
 }
 static void APIENTRY h_End(void) {
+    rec(GR_END, 0, 0, 0, NULL, 0);
+    fp_add(FP_END, 0, 0, (DWORD)__builtin_return_address(0), NULL, 0);
     if (pr_in && pr_frame_dump == 2) pr_dump_batch();
     if (sh_cap) {                                   // sombra, depois o desenho do jogo como veio
         sh_cap = 0;
@@ -2045,31 +2191,33 @@ static void (APIENTRY *r_Color3f)(GLfloat, GLfloat, GLfloat);
 static void (APIENTRY *r_Color3ub)(GLubyte, GLubyte, GLubyte);
 static void pr_tcx(float s0, float t0) { pr_count(PR_TCX); pr_cur_tc[0] = s0; pr_cur_tc[1] = t0; }
 static void pr_color(float r, float g, float b, float a) { pr_count(PR_COLOR); pr_col[0] = r; pr_col[1] = g; pr_col[2] = b; pr_col[3] = a; }
-static void APIENTRY h_TexCoord2d(GLdouble a, GLdouble b) { pr_tcx((float)a, (float)b); r_TexCoord2d(a, b); }
-static void APIENTRY h_TexCoord2dv(const GLdouble *p) { pr_tcx((float)p[0], (float)p[1]); r_TexCoord2dv(p); }
-static void APIENTRY h_TexCoord2i(GLint a, GLint b) { pr_tcx((float)a, (float)b); r_TexCoord2i(a, b); }
-static void APIENTRY h_TexCoord2s(GLshort a, GLshort b) { pr_tcx(a, b); r_TexCoord2s(a, b); }
-static void APIENTRY h_TexCoord3f(GLfloat a, GLfloat b, GLfloat c) { pr_tcx(a, b); r_TexCoord3f(a, b, c); }
-static void APIENTRY h_TexCoord3fv(const GLfloat *p) { pr_tcx(p[0], p[1]); r_TexCoord3fv(p); }
-static void APIENTRY h_TexCoord4f(GLfloat a, GLfloat b, GLfloat c, GLfloat d) { pr_tcx(d != 0 ? a / d : a, d != 0 ? b / d : b); r_TexCoord4f(a, b, c, d); }
-static void APIENTRY h_TexCoord4fv(const GLfloat *p) { pr_tcx(p[3] != 0 ? p[0] / p[3] : p[0], p[3] != 0 ? p[1] / p[3] : p[1]); r_TexCoord4fv(p); }
-static void APIENTRY h_Color4ub(GLubyte r, GLubyte g, GLubyte b, GLubyte a) { pr_color(r / 255.f, g / 255.f, b / 255.f, a / 255.f); r_Color4ub(r, g, b, a); }
-static void APIENTRY h_Color4ubv(const GLubyte *p) { pr_color(p[0] / 255.f, p[1] / 255.f, p[2] / 255.f, p[3] / 255.f); r_Color4ubv(p); }
-static void APIENTRY h_Color4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a) { pr_color(r, g, b, a); r_Color4f(r, g, b, a); }
-static void APIENTRY h_Color4fv(const GLfloat *p) { pr_color(p[0], p[1], p[2], p[3]); r_Color4fv(p); }
-static void APIENTRY h_Color3f(GLfloat r, GLfloat g, GLfloat b) { pr_color(r, g, b, 1); r_Color3f(r, g, b); }
-static void APIENTRY h_Color3ub(GLubyte r, GLubyte g, GLubyte b) { pr_color(r / 255.f, g / 255.f, b / 255.f, 1); r_Color3ub(r, g, b); }
-static void APIENTRY h_Vertex2f(GLfloat x, GLfloat y) { pr_count(PR_V2F); pr_vert(x, y, 0, 1); if (!sh_vtx(x, y, 0)) r_Vertex2f(x, y); }
-static void APIENTRY h_Vertex2fv(const GLfloat *p) { pr_count(PR_V2FV); pr_vert(p[0], p[1], 0, 1); if (!sh_vtx(p[0], p[1], 0)) r_Vertex2fv(p); }
-static void APIENTRY h_Vertex2i(GLint x, GLint y) { pr_count(PR_V2I); pr_vert((float)x, (float)y, 0, 1); if (!sh_vtx((float)x, (float)y, 0)) r_Vertex2i(x, y); }
-static void APIENTRY h_Vertex2s(GLshort x, GLshort y) { pr_count(PR_V2S); pr_vert(x, y, 0, 1); if (!sh_vtx(x, y, 0)) r_Vertex2s(x, y); }
-static void APIENTRY h_Vertex3f(GLfloat x, GLfloat y, GLfloat z) { pr_count(PR_V3F); pr_vert(x, y, z, 1); if (!sh_vtx(x, y, z)) r_Vertex3f(x, y, z); }
-static void APIENTRY h_Vertex3fv(const GLfloat *p) { pr_count(PR_V3FV); pr_vert(p[0], p[1], p[2], 1); if (!sh_vtx(p[0], p[1], p[2])) r_Vertex3fv(p); }
-static void APIENTRY h_Vertex3i(GLint x, GLint y, GLint z) { pr_count(PR_V3I); pr_vert((float)x, (float)y, (float)z, 1); if (!sh_vtx((float)x, (float)y, (float)z)) r_Vertex3i(x, y, z); }
-static void APIENTRY h_Vertex4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w) { pr_count(PR_V4F); pr_vert(x, y, z, w); if (!sh_vtx(x, y, z)) r_Vertex4f(x, y, z, w); }
-static void APIENTRY h_Vertex4fv(const GLfloat *p) { pr_count(PR_V4FV); pr_vert(p[0], p[1], p[2], p[3]); if (!sh_vtx(p[0], p[1], p[2])) r_Vertex4fv(p); }
-static void APIENTRY h_TexCoord2f(GLfloat s0, GLfloat t0) { pr_count(PR_TC2F); pr_cur_tc[0] = s0; pr_cur_tc[1] = t0; r_TexCoord2f(s0, t0); }
-static void APIENTRY h_TexCoord2fv(const GLfloat *p) { pr_count(PR_TC2FV); pr_cur_tc[0] = p[0]; pr_cur_tc[1] = p[1]; r_TexCoord2fv(p); }
+static void APIENTRY h_TexCoord2d(GLdouble a, GLdouble b) { rec_tc(a, b, 0, 1); pr_tcx((float)a, (float)b); r_TexCoord2d(a, b); }
+static void APIENTRY h_TexCoord2dv(const GLdouble *p) { rec_tc(p[0], p[1], 0, 1); pr_tcx((float)p[0], (float)p[1]); r_TexCoord2dv(p); }
+static void APIENTRY h_TexCoord2i(GLint a, GLint b) { rec_tc(a, b, 0, 1); pr_tcx((float)a, (float)b); r_TexCoord2i(a, b); }
+static void APIENTRY h_TexCoord2s(GLshort a, GLshort b) { rec_tc(a, b, 0, 1); pr_tcx(a, b); r_TexCoord2s(a, b); }
+static void APIENTRY h_TexCoord3f(GLfloat a, GLfloat b, GLfloat c) { rec_tc(a, b, c, 1); pr_tcx(a, b); r_TexCoord3f(a, b, c); }
+static void APIENTRY h_TexCoord3fv(const GLfloat *p) { rec_tc(p[0], p[1], p[2], 1); pr_tcx(p[0], p[1]); r_TexCoord3fv(p); }
+static void APIENTRY h_TexCoord4f(GLfloat a, GLfloat b, GLfloat c, GLfloat d) { rec_tc(a, b, c, d); fp_q = d; pr_tcx(d != 0 ? a / d : a, d != 0 ? b / d : b); r_TexCoord4f(a, b, c, d); }
+static void APIENTRY h_TexCoord4fv(const GLfloat *p) { rec_tc(p[0], p[1], p[2], p[3]); fp_q = p[3]; pr_tcx(p[3] != 0 ? p[0] / p[3] : p[0], p[3] != 0 ? p[1] / p[3] : p[1]); r_TexCoord4fv(p); }
+static void APIENTRY h_Color4ub(GLubyte r, GLubyte g, GLubyte b, GLubyte a) { rec_col(r / 255.f, g / 255.f, b / 255.f, a / 255.f); pr_color(r / 255.f, g / 255.f, b / 255.f, a / 255.f); r_Color4ub(r, g, b, a); }
+static void APIENTRY h_Color4ubv(const GLubyte *p) { rec_col(p[0] / 255.f, p[1] / 255.f, p[2] / 255.f, p[3] / 255.f); pr_color(p[0] / 255.f, p[1] / 255.f, p[2] / 255.f, p[3] / 255.f); r_Color4ubv(p); }
+static void APIENTRY h_Color4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a) { rec_col(r, g, b, a); pr_color(r, g, b, a); r_Color4f(r, g, b, a); }
+static void APIENTRY h_Color4fv(const GLfloat *p) { rec_col(p[0], p[1], p[2], p[3]); pr_color(p[0], p[1], p[2], p[3]); r_Color4fv(p); }
+static void APIENTRY h_Color3f(GLfloat r, GLfloat g, GLfloat b) { rec_col(r, g, b, 1); pr_color(r, g, b, 1); r_Color3f(r, g, b); }
+static void (APIENTRY *r_Color3fv)(const GLfloat *);
+static void APIENTRY h_Color3fv(const GLfloat *p) { rec_col(p[0], p[1], p[2], 1); pr_color(p[0], p[1], p[2], 1); r_Color3fv(p); }
+static void APIENTRY h_Color3ub(GLubyte r, GLubyte g, GLubyte b) { rec_col(r / 255.f, g / 255.f, b / 255.f, 1); pr_color(r / 255.f, g / 255.f, b / 255.f, 1); r_Color3ub(r, g, b); }
+static void APIENTRY h_Vertex2f(GLfloat x, GLfloat y) { rec_vtx(NULL, x, y, 0, 1); pr_count(PR_V2F); pr_vert(x, y, 0, 1); if (!sh_vtx(x, y, 0)) r_Vertex2f(x, y); }
+static void APIENTRY h_Vertex2fv(const GLfloat *p) { rec_vtx(p, p[0], p[1], 0, 1); pr_count(PR_V2FV); pr_vert(p[0], p[1], 0, 1); if (!sh_vtx(p[0], p[1], 0)) r_Vertex2fv(p); }
+static void APIENTRY h_Vertex2i(GLint x, GLint y) { rec_vtx(NULL, x, y, 0, 1); pr_count(PR_V2I); pr_vert((float)x, (float)y, 0, 1); if (!sh_vtx((float)x, (float)y, 0)) r_Vertex2i(x, y); }
+static void APIENTRY h_Vertex2s(GLshort x, GLshort y) { rec_vtx(NULL, x, y, 0, 1); pr_count(PR_V2S); pr_vert(x, y, 0, 1); if (!sh_vtx(x, y, 0)) r_Vertex2s(x, y); }
+static void APIENTRY h_Vertex3f(GLfloat x, GLfloat y, GLfloat z) { rec_vtx(NULL, x, y, z, 1); fp_vtx(NULL, x, y, z, __builtin_return_address(0)); pr_count(PR_V3F); pr_vert(x, y, z, 1); if (!sh_vtx(x, y, z)) r_Vertex3f(x, y, z); }
+static void APIENTRY h_Vertex3fv(const GLfloat *p) { rec_vtx(p, p[0], p[1], p[2], 1); fp_vtx(p, p[0], p[1], p[2], __builtin_return_address(0)); pr_count(PR_V3FV); pr_vert(p[0], p[1], p[2], 1); if (!sh_vtx(p[0], p[1], p[2])) r_Vertex3fv(p); }
+static void APIENTRY h_Vertex3i(GLint x, GLint y, GLint z) { rec_vtx(NULL, x, y, z, 1); pr_count(PR_V3I); pr_vert((float)x, (float)y, (float)z, 1); if (!sh_vtx((float)x, (float)y, (float)z)) r_Vertex3i(x, y, z); }
+static void APIENTRY h_Vertex4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w) { rec_vtx(NULL, x, y, z, w); pr_count(PR_V4F); pr_vert(x, y, z, w); if (!sh_vtx(x, y, z)) r_Vertex4f(x, y, z, w); }
+static void APIENTRY h_Vertex4fv(const GLfloat *p) { rec_vtx(p, p[0], p[1], p[2], p[3]); pr_count(PR_V4FV); pr_vert(p[0], p[1], p[2], p[3]); if (!sh_vtx(p[0], p[1], p[2])) r_Vertex4fv(p); }
+static void APIENTRY h_TexCoord2f(GLfloat s0, GLfloat t0) { rec_tc(s0, t0, 0, 1); fp_q = 1; pr_count(PR_TC2F); pr_cur_tc[0] = s0; pr_cur_tc[1] = t0; r_TexCoord2f(s0, t0); }
+static void APIENTRY h_TexCoord2fv(const GLfloat *p) { rec_tc(p[0], p[1], 0, 1); fp_q = 1; pr_count(PR_TC2FV); pr_cur_tc[0] = p[0]; pr_cur_tc[1] = p[1]; r_TexCoord2fv(p); }
 static void APIENTRY h_VertexPointer(GLint n, GLenum t, GLsizei st, const void *p) { pr_vp.size = n; pr_vp.type = t; pr_vp.stride = st; pr_vp.ptr = p; r_VertexPointer(n, t, st, p); }
 static void APIENTRY h_TexCoordPointer(GLint n, GLenum t, GLsizei st, const void *p) { pr_tp.size = n; pr_tp.type = t; pr_tp.stride = st; pr_tp.ptr = p; r_TexCoordPointer(n, t, st, p); }
 static void APIENTRY h_DrawArrays(GLenum m, GLint first, GLsizei n) {
@@ -2121,6 +2269,100 @@ static void pr_tick(void) {
     if (f4) logf_("hud_probe (5 s): dica do F4 pedida %ld vezes", f4);
 }
 
+// 60 fps: comandos de estado que só precisam de gancho para entrar no instantâneo (instalados com fps > 30 ou debug)
+static void (APIENTRY *r_BlendFunc)(GLenum, GLenum);
+static void (APIENTRY *r_AlphaFunc)(GLenum, GLclampf);
+static void (APIENTRY *r_DepthFunc)(GLenum);
+static void (APIENTRY *r_DepthRange)(GLclampd, GLclampd);
+static void (APIENTRY *r_ShadeModel)(GLenum);
+static void (APIENTRY *r_PolygonMode)(GLenum, GLenum);
+static void (APIENTRY *r_Hint)(GLenum, GLenum);
+static void (APIENTRY *r_ClearColor)(GLclampf, GLclampf, GLclampf, GLclampf);
+static void (APIENTRY *r_LoadIdentity)(void);
+static void APIENTRY h_BlendFunc(GLenum a, GLenum b) { rec(GR_BLENDFUNC, a, b, 0, NULL, 0); r_BlendFunc(a, b); }
+static void APIENTRY h_AlphaFunc(GLenum f, GLclampf v) { double d = v; rec(GR_ALPHAFUNC, f, 0, 0, &d, 1); r_AlphaFunc(f, v); }
+static void APIENTRY h_DepthFunc(GLenum f) { rec(GR_DEPTHFUNC, f, 0, 0, NULL, 0); r_DepthFunc(f); }
+static void APIENTRY h_DepthRange(GLclampd n, GLclampd f) { double d[2] = { n, f }; rec(GR_DEPTHRANGE, 0, 0, 0, d, 2); r_DepthRange(n, f); }
+static void APIENTRY h_ShadeModel(GLenum m) { rec(GR_SHADEMODEL, m, 0, 0, NULL, 0); r_ShadeModel(m); }
+static void APIENTRY h_PolygonMode(GLenum f, GLenum m) { rec(GR_POLYGONMODE, f, m, 0, NULL, 0); r_PolygonMode(f, m); }
+static void APIENTRY h_Hint(GLenum t, GLenum m) { rec(GR_HINT, t, m, 0, NULL, 0); r_Hint(t, m); }
+static void APIENTRY h_ClearColor(GLclampf r, GLclampf g, GLclampf b, GLclampf a) { double d[4] = { r, g, b, a }; rec(GR_CLEARCOLOR, 0, 0, 0, d, 4); r_ClearColor(r, g, b, a); }
+static void APIENTRY h_LoadIdentity(void) { rec(GR_LOADIDENTITY, 0, 0, 0, NULL, 0); r_LoadIdentity(); }
+
+// repete um comando do instantâneo pelos ganchos (as camadas do mod valem de novo); GR_RAW = valores já do OpenGL
+static void replay_cmd(const GR_CMD *c, void *ctx) {
+    (void)ctx;
+    const unsigned *u = c->u; const double *d = c->d;
+    switch (c->op) {
+    case GR_BEGIN: h_Begin(u[0]); break;
+    case GR_END: h_End(); break;
+    case GR_VERTEX: {
+        GLfloat v[3] = { (GLfloat)d[0], (GLfloat)d[1], (GLfloat)d[2] };
+        if (d[3] == 1) h_Vertex3fv(v); else h_Vertex4f(v[0], v[1], v[2], (GLfloat)d[3]);
+        break; }
+    case GR_COLOR: h_Color4f((GLfloat)d[0], (GLfloat)d[1], (GLfloat)d[2], (GLfloat)d[3]); break;
+    case GR_TEXCOORD: h_TexCoord4f((GLfloat)d[0], (GLfloat)d[1], (GLfloat)d[2], (GLfloat)d[3]); break;
+    case GR_BIND: h_BindTexture(u[0], u[1]); break;
+    case GR_ENABLE: h_Enable(u[0]); break;
+    case GR_DISABLE: h_Disable(u[0]); break;
+    case GR_BLENDFUNC: (r_BlendFunc ? r_BlendFunc : glBlendFunc)(u[0], u[1]); break;
+    case GR_ALPHAFUNC: (r_AlphaFunc ? r_AlphaFunc : glAlphaFunc)(u[0], (GLclampf)d[0]); break;
+    case GR_DEPTHFUNC: (r_DepthFunc ? r_DepthFunc : glDepthFunc)(u[0]); break;
+    case GR_DEPTHRANGE: (r_DepthRange ? r_DepthRange : glDepthRange)(d[0], d[1]); break;
+    case GR_SHADEMODEL: (r_ShadeModel ? r_ShadeModel : glShadeModel)(u[0]); break;
+    case GR_POLYGONMODE: (r_PolygonMode ? r_PolygonMode : glPolygonMode)(u[0], u[1]); break;
+    case GR_HINT: (r_Hint ? r_Hint : glHint)(u[0], u[1]); break;
+    case GR_CLEARCOLOR: (r_ClearColor ? r_ClearColor : glClearColor)((GLclampf)d[0], (GLclampf)d[1], (GLclampf)d[2], (GLclampf)d[3]); break;
+    case GR_CLEAR: h_Clear(u[0]); break;
+    case GR_VIEWPORT: h_Viewport((GLint)d[0], (GLint)d[1], (GLsizei)d[2], (GLsizei)d[3]); break;
+    case GR_SCISSOR: h_Scissor((GLint)d[0], (GLint)d[1], (GLsizei)d[2], (GLsizei)d[3]); break;
+    case GR_VIEWPORT | GR_RAW: r_Viewport((GLint)d[0], (GLint)d[1], (GLsizei)d[2], (GLsizei)d[3]); break;
+    case GR_SCISSOR | GR_RAW: r_Scissor((GLint)d[0], (GLint)d[1], (GLsizei)d[2], (GLsizei)d[3]); break;
+    case GR_MATRIXMODE: h_MatrixMode(u[0]); break;
+    case GR_LOADIDENTITY: (r_LoadIdentity ? r_LoadIdentity : glLoadIdentity)(); break;
+    case GR_ORTHO: h_Ortho(d[0], d[1], d[2], d[3], d[4], d[5]); break;
+    default: break;
+    }
+}
+
+// ---------------------------------------------------------------- 60 fps (etapa 1): quadros extras na espera do jogo
+// O jogo chama a espera 0x415700 no fim de cada tick (0x4013a1). Antes dela, até o prazo do tick, o mod repete o
+// instantâneo do desenho pelos ganchos e troca o quadro, nos horários de pacer_next. Prazo do tick anterior (= início
+// deste) em [0x639b10], QPC por tick em [0x639af0], [0x4d07f8] = o jogo vai pular o desenho (atrasado).
+static int g_extra_off;   // debug: F3 desliga os quadros extras
+static void present_extra(void) {
+    fbo_present();
+    if (g_shot_r) { g_shot_r = 0; shot_save("_r"); }
+    if (g_swap_gdi) r_SwapBuffersGdi(g_swap_dc); else r_wglSwapBuffers(g_swap_dc);
+    fbo_rebind();
+    clear_bars();
+    g_frames++;
+}
+static void __cdecl bbfix_pacer(void) {
+    if (g_rec_on && g_rec_ok && !g_extra_off && g_swap_dc && !*(volatile DWORD *)0x4d07f8 && !(g_hwnd && IsIconic(g_hwnd))) {
+        static LONGLONG g0, freq, period;
+        if (!freq) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); freq = f.QuadPart; period = pacer_period(freq, cfg.fps); }
+        LONGLONG start = *(volatile LONGLONG *)0x639b10, end = start + *(volatile LONGLONG *)0x639af0, margin = freq / 500, t;
+        if (!g0) g0 = start;
+        LARGE_INTEGER now; QueryPerformanceCounter(&now);
+        LONGLONG after = now.QuadPart;                     // pontos que já passaram ficam para trás (sem rajada)
+        while ((t = pacer_next(g0, period, start, after, end, margin)) >= 0) {
+            do { QueryPerformanceCounter(&now); if (now.QuadPart < t) YieldProcessor(); } while (now.QuadPart < t);
+            g_replaying = 1; gr_replay(&g_show, replay_cmd, NULL); g_replaying = 0;
+            present_extra();
+            QueryPerformanceCounter(&now);
+            after = now.QuadPart > t ? now.QuadPart : t;
+        }
+    }
+    ((void (*)(void))0x415700)();
+}
+static void install_pacer(void) {
+    if (!g_rec_on) return;
+    char r[5]; DWORD rel = (DWORD)(ULONG_PTR)bbfix_pacer - (0x4013a1 + 5);
+    r[0] = (char)0xE8; memcpy(r + 1, &rel, 4);
+    if (!patch_bytes(0x4013a1, "\xE8\x5A\x43\x01\x00", 5, r)) { g_rec_on = 0; logf_("fps: chamada da espera do jogo nao encontrada, usando 30"); }
+}
+
 #define H(name) { #name, (void **)&r_##name, (void *)h_##name }
 static struct { const char *name; void **real; void *hook; } gl_hooks[] = {
     H(Viewport), H(Scissor), H(Ortho), H(Frustum), H(MatrixMode), H(LoadMatrixf), H(LoadMatrixd), H(Clear),
@@ -2134,6 +2376,9 @@ static struct { const char *name; void **real; void *hook; } gl_probe_hooks[] = 
     H(CallLists), H(Rectf), H(Recti), H(VertexPointer), H(TexCoordPointer), H(TexCoord2d), H(TexCoord2dv), H(TexCoord2i),
     H(TexCoord2s), H(TexCoord3f), H(TexCoord3fv), H(TexCoord4f), H(TexCoord4fv), H(Color4ub), H(Color4ubv), H(Color4f),
     H(Color4fv), H(Color3f), H(Color3ub),
+};
+static struct { const char *name; void **real; void *hook; } gl_rec_hooks[] = {   // 60 fps (fps > 30) e medição do F5 (debug)
+    H(Color3fv), H(BlendFunc), H(AlphaFunc), H(DepthFunc), H(DepthRange), H(ShadeModel), H(PolygonMode), H(Hint), H(ClearColor), H(LoadIdentity),
 };
 #undef H
 
@@ -2153,7 +2398,10 @@ static FARPROC WINAPI h_GetProcAddress(HMODULE m, LPCSTR name) {
     if (name[0] == 'g' && name[1] == 'l' && name[2] != 'u') {
         for (size_t i = 0; i < sizeof gl_hooks / sizeof *gl_hooks; i++)
             if (!strcmp(name + 2, gl_hooks[i].name)) { *gl_hooks[i].real = (void *)p; return (FARPROC)gl_hooks[i].hook; }
-        if (cfg.hud_probe || cfg.hud_shadow)
+        if (cfg.debug || cfg.fps > 30)
+            for (size_t i = 0; i < sizeof gl_rec_hooks / sizeof *gl_rec_hooks; i++)
+                if (!strcmp(name + 2, gl_rec_hooks[i].name)) { *gl_rec_hooks[i].real = (void *)p; return (FARPROC)gl_rec_hooks[i].hook; }
+        if (cfg.hud_probe || cfg.hud_shadow || cfg.debug || cfg.fps > 30)
             for (size_t i = 0; i < sizeof gl_probe_hooks / sizeof *gl_probe_hooks; i++)
                 if (!strcmp(name + 2, gl_probe_hooks[i].name)) { *gl_probe_hooks[i].real = (void *)p; return (FARPROC)gl_probe_hooks[i].hook; }
     }
@@ -4500,6 +4748,14 @@ static void debug_keys(void) {
         else logf_("F7: tipo %d (cat %02x id %04x) com o alcance ORIGINAL", g_rexcl, g_rtypes[g_rexcl].cat, g_rtypes[g_rexcl].id);
     }
     prev7 = d7;
+    static int prev3;
+    int d3 = (GetAsyncKeyState(VK_F3) & 0x8000) != 0;
+    if (d3 && !prev3 && g_rec_on) { g_extra_off = !g_extra_off; logf_("F3: quadros extras %s", g_extra_off ? "DESLIGADOS" : "ligados"); }
+    prev3 = d3;
+    static int prev5;
+    int d5 = (GetAsyncKeyState(VK_F5) & 0x8000) != 0;
+    if (d5 && !prev5 && !fp_state) { fp_state = 1; logf_("F5: medicao dos 60 fps armada"); }
+    prev5 = d5;
     static int prev8;
     int d8 = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
     if (d8 && !prev8) { g_sim_pad = (g_sim_pad + 1) % 3; logf_("F8: controle %s", g_sim_pad == 1 ? "DESCONECTADO (simulado)" : g_sim_pad == 2 ? "CONECTADO (simulado)" : "real"); }
@@ -4647,7 +4903,9 @@ static void init(HMODULE self) {
     install_text_hook();
     if (cfg.hud_probe) install_op14_probe();
     load_keymap();
-    logf_("config: aspect=%d msaa=%d vsync=%d xinput=%d unlock_dinput_joystick=%d analog_joystick=%d right_stick_partner=%d", cfg.aspect, cfg.msaa, cfg.vsync, cfg.xinput, cfg.unlock_joy, aj.on, aj.partner);
+    logf_("config: aspect=%d msaa=%d vsync=%d xinput=%d unlock_dinput_joystick=%d analog_joystick=%d right_stick_partner=%d fps=%d", cfg.aspect, cfg.msaa, cfg.vsync, cfg.xinput, cfg.unlock_joy, aj.on, aj.partner, cfg.fps);
+    rec_init();
+    install_pacer();
 }
 
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID r) {
