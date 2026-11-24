@@ -37,6 +37,8 @@ O HUD da fase (silhuetas do Pernalonga e do Taz, barras de vida, ícones) vem da
    - ícones coloridos vão pelo Real-ESRGAN, com o alfa ampliado à parte;
    - os degradês das barras são só ampliados.
 
+Se você mudar o "Brilho" do menu Vídeo, as cores das texturas mudam: o mod exporta a fonte de novo (e avisa no log) e basta rodar o `make_pack.py` outra vez.
+
 A folha `bin\hd\hud\hud_comparacao.png` mostra cada textura original (ampliada sem suavizar) ao lado da HD. Sem a pasta `hud`, o HUD continua como antes (xBR).
 
 | Arquivo | O que é |

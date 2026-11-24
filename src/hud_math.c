@@ -118,3 +118,8 @@ void hud_shadow_mask(const unsigned char *alpha, int w, int h, int padx, int pad
         }
     free(a); free(b);
 }
+
+int hud_fonte_action(int bmp_exists, int txt_ok, unsigned long long txt_hash, unsigned long long cur_hash) {
+    if (!bmp_exists || !txt_ok) return FONTE_WRITE;
+    return txt_hash == cur_hash ? FONTE_KEEP : FONTE_REWRITE;
+}

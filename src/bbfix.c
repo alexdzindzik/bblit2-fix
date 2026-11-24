@@ -1515,12 +1515,12 @@ static void sh_store(GLuint name, const DWORD *hd, int W, int H) {
 // pacote HD do HUD (tools\hd_menu\make_pack.py): o mod exporta as texturas do HUD para bin\hd\hud\fonte e
 // carrega bin\hd\hud\<hash>.bmp (4x) no lugar do xBR. Só quando a pasta bin\hd existe.
 static int g_hud_dir;                           // bin\hd existe (visto ao ligar)
-enum { HP_EXPORTED = 1, HP_LOADED = 2, HP_BADLOG = 4, HP_BRIGHTLOG = 8 };
+enum { HP_EXPORTED = 1, HP_LOADED = 2, HP_BADLOG = 4 };
 static struct { unsigned long long h; unsigned char f; } g_hudp[96]; static int g_hudp_n, g_hudp_loaded;
 static unsigned char *hudp_flags(unsigned long long h) {
     static unsigned char spare;
     for (int i = 0; i < g_hudp_n; i++) if (g_hudp[i].h == h) return &g_hudp[i].f;
-    if (g_hudp_n == (int)(sizeof g_hudp / sizeof *g_hudp)) { spare = HP_EXPORTED | HP_BADLOG | HP_BRIGHTLOG; return &spare; }
+    if (g_hudp_n == (int)(sizeof g_hudp / sizeof *g_hudp)) { spare = HP_EXPORTED | HP_BADLOG; return &spare; }
     g_hudp[g_hudp_n].h = h; g_hudp[g_hudp_n].f = 0;
     return &g_hudp[g_hudp_n++].f;
 }
@@ -1539,20 +1539,27 @@ static void hud_export(unsigned long long hs, int w, int h, const DWORD *rgba, u
     char d[MAX_PATH], p[MAX_PATH];
     snprintf(d, sizeof d, "%s\\hd\\hud", g_dir); CreateDirectoryA(d, NULL);
     snprintf(d, sizeof d, "%s\\hd\\hud\\fonte", g_dir); CreateDirectoryA(d, NULL);
+    snprintf(p, sizeof p, "%s\\%016llx.txt", d, hs);
+    unsigned long long cur = rgba_hash((const uint32_t *)rgba, (size_t)w * h), had = 0;
+    FILE *f = fopen(p, "r"); int txt_ok = 0;
+    if (f) { txt_ok = fscanf(f, "%llx", &had) == 1; fclose(f); }
     snprintf(p, sizeof p, "%s\\%016llx.bmp", d, hs);
-    if (GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES) return;
+    int act = hud_fonte_action(GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES, txt_ok, had, cur);
+    if (act == FONTE_KEEP) return;
     size_t n = bmp32_build((const uint32_t *)rgba, w, h, NULL);
     unsigned char *b = malloc(n); if (!b) return;
     bmp32_build((const uint32_t *)rgba, w, h, b);
-    FILE *f = fopen(p, "wb"); int ok = f && fwrite(b, 1, n, f) == n; if (f) fclose(f);
+    f = fopen(p, "wb"); int ok = f && fwrite(b, 1, n, f) == n; if (f) fclose(f);
     free(b);
     if (!ok) { DeleteFileA(p); logf_("HUD: nao consegui gravar %s", p); return; }
     snprintf(p, sizeof p, "%s\\%016llx.txt", d, hs);
-    if ((f = fopen(p, "w"))) { fprintf(f, "%016llx\n", rgba_hash((const uint32_t *)rgba, (size_t)w * h)); fclose(f); }
-    logf_("HUD: textura %016llx %dx%d exportada para hd\\hud\\fonte", hs, w, h);
+    if ((f = fopen(p, "w"))) { fprintf(f, "%016llx\n", cur); fclose(f); }
+    if (act == FONTE_REWRITE)
+        logf_("HUD: textura %016llx com outras cores (Brilho mudou): fonte exportada de novo; rode o make_pack.py para o pacote acompanhar", hs);
+    else logf_("HUD: textura %016llx %dx%d exportada para hd\\hud\\fonte", hs, w, h);
 }
 // devolve a versão 4x do pacote (malloc) ou NULL (sem arquivo, inválido ou tamanho errado: fica o xBR)
-static DWORD *hud_pack_load(unsigned long long hs, int w, int h, const DWORD *rgba, unsigned char *fl) {
+static DWORD *hud_pack_load(unsigned long long hs, int w, int h, unsigned char *fl) {
     char p[MAX_PATH]; snprintf(p, sizeof p, "%s\\hd\\hud\\%016llx.bmp", g_dir, hs);
     size_t n = 0; unsigned char *b = file_read(p, &n);
     if (!b) return NULL;
@@ -1565,14 +1572,6 @@ static DWORD *hud_pack_load(unsigned long long hs, int w, int h, const DWORD *rg
     }
     free(b);
     if (!px) return NULL;
-    if (!(*fl & HP_BRIGHTLOG)) {                // o pacote foi gerado com estas mesmas cores?
-        *fl |= HP_BRIGHTLOG;
-        snprintf(p, sizeof p, "%s\\hd\\hud\\fonte\\%016llx.txt", g_dir, hs);
-        FILE *f = fopen(p, "r"); unsigned long long want = 0;
-        if (f) { if (fscanf(f, "%llx", &want) != 1) want = 0; fclose(f); }
-        if (want && want != rgba_hash((const uint32_t *)rgba, (size_t)w * h))
-            logf_("HUD: pacote do HUD gerado com outro Brilho (textura %016llx); rode o make_pack.py de novo", hs);
-    }
     if (!(*fl & HP_LOADED)) { *fl |= HP_LOADED; logf_("HUD HD: %016llx do pacote (%d texturas)", hs, ++g_hudp_loaded); }
     return px;
 }
@@ -1606,7 +1605,7 @@ static int hd_replace(GLenum t, GLint ifmt, int w, int h, const DWORD *rgba, uns
     if (cfg.hud_hd && g_hud_dir && hud_kind(hs) != HUD_NONE) {
         unsigned char *fl = hudp_flags(hs);
         hud_export(hs, w, h, rgba, fl);
-        DWORD *hd = hud_pack_load(hs, w, h, rgba, fl);
+        DWORD *hd = hud_pack_load(hs, w, h, fl);
         if (hd) {                                   // mesmo caminho do xBR: borda espalhada, envio 4x, marca HD
             tex_dilate(hd, W, H);
             upload_rgba(t, ifmt, W, H, hd);

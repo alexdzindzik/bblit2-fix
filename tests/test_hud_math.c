@@ -100,6 +100,13 @@ static void test_shadow_aniso(void) {
     CHECK(out[18 * 21 + 10] == 0);                                     // 8 texels em y (> 4σy = 4)
 }
 
+static void test_fonte_rewrite_on_brightness(void) {
+    CHECK(hud_fonte_action(0, 0, 0, 0x1234) == FONTE_WRITE);          // sem fonte: exporta
+    CHECK(hud_fonte_action(1, 1, 0x1234, 0x1234) == FONTE_KEEP);      // mesma cor: fica
+    CHECK(hud_fonte_action(1, 1, 0x1234, 0x9999) == FONTE_REWRITE);   // Brilho mudou: exporta de novo (e avisa)
+    CHECK(hud_fonte_action(1, 0, 0, 0x9999) == FONTE_WRITE);          // .txt sumiu ou ilegível: exporta de novo
+}
+
 int main(void) {
     test_hud_kind();
     test_bmp_roundtrip();
@@ -110,6 +117,7 @@ int main(void) {
     test_shadow_spreads();
     test_shadow_sum();
     test_shadow_aniso();
+    test_fonte_rewrite_on_brightness();
     printf("%d/%d verificações ok\n", g_run - g_fail, g_run);
     return g_fail ? 1 : 0;
 }
