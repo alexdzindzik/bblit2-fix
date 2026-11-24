@@ -22,13 +22,14 @@
 #include "stick_shape.h"
 #include "glrec.h"
 #include "pacer.h"
+#include "interp.h"
 
 #define FIX_VERSION "0.13.1"
 
 // ---------------------------------------------------------------- config / log
 static struct {
-    int enabled, log_gl, aspect, msaa, vsync, xinput, unlock_joy, a_enter, deadzone, cam_stick, swap_ab, language, game_res, background, debug, inv_stick, inv_trig, draw_dist, ssaa, mipmaps, aniso, actor_dist, auto_quality, lod_dist, force_gl, dump_tex, hd_tex, pad_prompts, menu_fill, hires_menu, menu_pad, menu_hd, hud_probe, center_menus, hud_hd, hud_shadow, fps;
-} cfg = { 1, 1, 2, 4, 1, 1, 0, 1, 30, 1, 0, -1, 1, 1, 0, 1, 1, 400, 2, 1, 16, 200, 1, 400, 1, 0, 1, 2, 1, 1, 1, 1, 0, 1, 1, 45, 30 };
+    int enabled, log_gl, aspect, msaa, vsync, xinput, unlock_joy, a_enter, deadzone, cam_stick, swap_ab, language, game_res, background, debug, inv_stick, inv_trig, draw_dist, ssaa, mipmaps, aniso, actor_dist, auto_quality, lod_dist, force_gl, dump_tex, hd_tex, pad_prompts, menu_fill, hires_menu, menu_pad, menu_hd, hud_probe, center_menus, hud_hd, hud_shadow, fps, fps_jump;
+} cfg = { 1, 1, 2, 4, 1, 1, 0, 1, 30, 1, 0, -1, 1, 1, 0, 1, 1, 400, 2, 1, 16, 200, 1, 400, 1, 0, 1, 2, 1, 1, 1, 1, 0, 1, 1, 45, 30, 500 };
 // joystick analógico [pad]: o controle XInput oferecido ao jogo como joystick do DirectInput (live = o jogo abriu)
 static struct { int on, partner, dead, start, outer, outer_r, live; } aj = { 0, 0, 10, 20, 95, 90, 0 };
 // analógico direito no pacote do PS1 (bytes 4/5), escrito por xj_GetDeviceState e lido pelo bbfix_rs_stub
@@ -62,6 +63,7 @@ static void load_config(void) {
     cfg.msaa      = ini_int("video", "msaa", 4);
     cfg.vsync     = ini_int("video", "vsync", 1);
     cfg.fps       = ini_int("video", "fps", 30);
+    cfg.fps_jump  = ini_int("video", "fps_jump", 500);
     cfg.xinput    = ini_int("pad", "xinput", 1);
     cfg.unlock_joy= ini_int("pad", "unlock_dinput_joystick", 0);
     cfg.a_enter   = ini_int("pad", "a_is_enter", 1);
@@ -303,31 +305,87 @@ enum { FP_ORTHO_ = 4, FP_VIEWPORT_ = 5, FP_CLEAR_ = 6, FP_ENABLE_ = 8, FP_DISABL
 // Com [video] fps > 30, os ganchos gravam cada comando de desenho do jogo (argumentos crus, antes das camadas do mod).
 // Na espera do jogo, o instantâneo é repetido pelos mesmos ganchos nos quadros extras (Task 4). fps=30: nada disso roda.
 #define REC_CAP 100000   // comandos por tick (a medição deu até ~10 000)
-static GR_SNAP g_rec, g_show;   // g_rec = sendo gravado; g_show = o tick completo que os quadros extras repetem
-static int g_rec_on, g_replaying, g_rec_ok, g_rec_bad;   // gravando; repetindo agora; instantâneo pronto; invalidado
+static GR_SNAP g_rec, g_show, g_prev;   // g_rec = sendo gravado; g_show = tick B (último completo); g_prev = tick A
+static int g_prev_ok, g_pair_ok;        // A completo; par A, B válido para interpolar (ticks seguidos)
+static LONGLONG g_show_t, g_prev_t;     // QPC do fim de B e de A
+static DWORD g_show_tick, g_prev_tick;  // contador de ticks do jogo ([0x4d0708]) em B e em A
+static int g_rec_on, g_replaying, g_rec_ok, g_rec_bad, g_rec_draws;   // gravando; repetindo agora; instantâneo pronto; invalidado
 static void rec(unsigned op, unsigned u0, unsigned u1, unsigned u2, const double *d, int nd) {
     if (!g_rec_on || g_replaying) return;
     unsigned u[3] = { u0, u1, u2 };
+    if (op == GR_BEGIN) g_rec_draws++;
     gr_put(&g_rec, op, u, 3, d, nd);
 }
 static void rec_tc(double s0, double t0, double r0, double q0) { double d[4] = { s0, t0, r0, q0 }; rec(GR_TEXCOORD, 0, 0, 0, d, 4); }
 static void rec_col(double r, double g, double b, double a) { double d[4] = { r, g, b, a }; rec(GR_COLOR, 0, 0, 0, d, 4); }
-static void rec_vtx(const void *p, double x, double y, double z, double w) { double d[4] = { x, y, z, w }; rec(GR_VERTEX, (unsigned)(ULONG_PTR)p, 0, 0, d, 4); }
-static void rec_invalidate(void) { g_rec_bad = 1; g_rec_ok = 0; }
+// chaves do pool (etapa 2): posição do pool -> (k0, k1) escrita neste quadro; k0 = bloco do cenário ou vértices da
+// malha, k1 = (ocorrência no quadro << 16) | número do ponto. Marcadas pelos ganchos bbfix_room/bbfix_mesh_*.
+#define TAG_CAP 70000          // o pool do jogo tem 0x111700 bytes = 70 000 posições de 16 bytes
+#define G_POOL (*(volatile DWORD *)0x4d0844)
+#define G_POOL_OBJ (*(volatile DWORD *)0x4d0848)
+#define G_POOL_USED (*(volatile DWORD *)0x4d084c)
+static unsigned g_tag_k0[TAG_CAP], g_tag_k1[TAG_CAP], g_tag_fr[TAG_CAP], g_tag_frame = 1;
+static unsigned char g_tag_room[TAG_CAP];             // 1 = ponto do cenário (k0 = bloco), 0 = de malha (k0 = nó)
+static int g_tag_on;
+static DWORD g_tag_list[TAG_CAP]; static int g_tag_n;   // posições marcadas neste quadro
+static void tag_slot(DWORD slot, unsigned k0, unsigned k1, int room) {
+    if (slot >= TAG_CAP) return;
+    if (g_tag_fr[slot] != g_tag_frame) { g_tag_fr[slot] = g_tag_frame; g_tag_list[g_tag_n++] = slot; }
+    g_tag_k0[slot] = k0; g_tag_k1[slot] = k1; g_tag_room[slot] = (unsigned char)room;
+}
+// câmera do cenário em cada tick: a matriz 0x63c020 que 0x4095e0 passa para 0x408990, lida no primeiro bloco do
+// tick. ok = 0 se o tick usou outra projeção (0x409610) ou a matriz mudou entre blocos (tela dividida, por exemplo).
+typedef struct { float m[12], K, sent; int ok, seen; } CAM_SNAP;
+static CAM_SNAP g_cam_rec, g_cam_show, g_cam_prev;
+// tabela do pool de cada instantâneo: todos os pontos com chave do quadro, desenhados ou não (o casamento de A usa
+// esta tabela: um triângulo que só aparece em B ainda acha os pontos dele em A)
+typedef struct { unsigned k0, k1; float p[3]; } PT_ENT;
+typedef struct { PT_ENT *e; int n; } PT_TAB;
+static PT_TAB g_pt_rec, g_pt_show, g_pt_prev;
+static void pt_capture(PT_TAB *t) {                    // no fim do quadro, o pool ainda tem os pontos deste quadro
+    t->n = 0;
+    DWORD start = G_POOL;
+    if (!start || !t->e) return;
+    for (int i = 0; i < g_tag_n; i++) {
+        DWORD sl = g_tag_list[i];
+        const DWORD *q = (const DWORD *)(ULONG_PTR)(start + sl * 16);
+        if (q[0] == 0x7f7fffff || q[0] == 0x8fffffff) continue;   // marcado invisível pelo jogo
+        PT_ENT *e = &t->e[t->n++];
+        e->k0 = g_tag_k0[sl]; e->k1 = g_tag_k1[sl] + 1;
+        memcpy(e->p, q, 12);
+    }
+}
+static void rec_vtx(const void *p, double x, double y, double z, double w) {
+    double d[4] = { x, y, z, w };
+    unsigned k0 = 0, k1 = 0;
+    if (p && g_tag_on && g_rec_on && !g_replaying) {
+        DWORD a = (DWORD)(ULONG_PTR)p, start = G_POOL;
+        if (start && a >= start && a < start + TAG_CAP * 16 && !((a - start) & 15)) {
+            DWORD sl = (a - start) >> 4;
+            if (g_tag_fr[sl] == g_tag_frame) { k0 = g_tag_k0[sl]; k1 = g_tag_k1[sl] + 1; }
+        }
+    }
+    rec(GR_VERTEX, (unsigned)(ULONG_PTR)p, k0, k1, d, 4);
+}
+static void rec_invalidate(void) { g_rec_bad = 1; g_rec_ok = 0; g_pair_ok = 0; }
+static int pair_alloc(void);
+static void pair_prepare(void);
 static void rec_init(void) {
     { DEVMODEA dm; memset(&dm, 0, sizeof dm); dm.dmSize = sizeof dm;
       if (EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &dm)) logf_("monitor: %lux%lu a %lu Hz", dm.dmPelsWidth, dm.dmPelsHeight, dm.dmDisplayFrequency); }
     if (cfg.fps != 30 && cfg.fps != 60 && cfg.fps != 120 && cfg.fps != 144) { logf_("fps=%d nao suportado: usando 30", cfg.fps); cfg.fps = 30; }
     if (cfg.fps <= 30) return;
-    GR_CMD *b = malloc(sizeof(GR_CMD) * REC_CAP * 2);
-    if (!b) { logf_("fps=%d: sem memoria para o instantaneo, usando 30", cfg.fps); cfg.fps = 30; return; }
-    gr_init(&g_rec, b, REC_CAP); gr_init(&g_show, b + REC_CAP, REC_CAP); g_rec_on = 1;
+    GR_CMD *b = malloc(sizeof(GR_CMD) * REC_CAP * 3);
+    if (!b || !pair_alloc()) { logf_("fps=%d: sem memoria para o instantaneo, usando 30", cfg.fps); cfg.fps = 30; return; }
+    gr_init(&g_rec, b, REC_CAP); gr_init(&g_show, b + REC_CAP, REC_CAP); gr_init(&g_prev, b + 2 * REC_CAP, REC_CAP); g_rec_on = 1;
     logf_("fps=%d: gravando o desenho de cada tick para os quadros extras", cfg.fps);
 }
 // começo do instantâneo (fim do after_swap): estado inicial lido do OpenGL, para a repetição começar igual
+static void tag_new_frame(void);
 static void rec_start(void) {
     if (!g_rec_on) return;
-    gr_reset(&g_rec);
+    gr_reset(&g_rec); g_rec_draws = 0;
+    tag_new_frame(); g_tag_n = 0; g_cam_rec.ok = g_cam_rec.seen = 0;
     static const GLenum caps[] = { GL_BLEND, GL_DEPTH_TEST, GL_ALPHA_TEST, GL_TEXTURE_2D, GL_CULL_FACE, GL_SCISSOR_TEST };
     for (size_t i = 0; i < sizeof caps / sizeof *caps; i++) rec(glIsEnabled(caps[i]) ? GR_ENABLE : GR_DISABLE, caps[i], 0, 0, NULL, 0);
     GLint v[4] = { 0 }, w = 0; GLfloat f = 0; double d[4];
@@ -339,13 +397,20 @@ static void rec_start(void) {
     glGetIntegerv(GL_SCISSOR_BOX, v); for (int i = 0; i < 4; i++) d[i] = v[i]; rec(GR_SCISSOR | GR_RAW, 0, 0, 0, d, 4);
     glGetIntegerv(GL_MATRIX_MODE, &w); rec(GR_MATRIXMODE, (unsigned)w, 0, 0, NULL, 0);
 }
-// fim do instantâneo (troca do jogo)
-static void rec_finish(void) {
+// fim do instantâneo (troca do jogo): A <- B <- gravado e casamento do par; o próximo começa no fim do after_swap
+static void rec_close(void) {
     if (!g_rec_on) return;
-    g_rec_ok = g_rec.n > 0 && !g_rec.overflow && !g_rec_bad;
-    GR_SNAP t = g_show; g_show = g_rec; g_rec = t;    // o tick gravado vai para a repetição; grava o próximo no outro
+    int ok = g_rec.n > 0 && g_rec_draws > 0 && !g_rec.overflow && !g_rec_bad;   // tick sem desenho (pulado) não vale
+    pt_capture(&g_pt_rec);
+    GR_SNAP t = g_prev; g_prev = g_show; g_show = g_rec; g_rec = t;   // A <- B <- tick gravado; grava o próximo no antigo A
+    PT_TAB pt = g_pt_prev; g_pt_prev = g_pt_show; g_pt_show = g_pt_rec; g_pt_rec = pt;
+    CAM_SNAP cs = g_cam_prev; g_cam_prev = g_cam_show; g_cam_show = g_cam_rec; g_cam_rec = cs;
+    g_prev_ok = g_rec_ok; g_prev_t = g_show_t; g_prev_tick = g_show_tick;
+    LARGE_INTEGER now; QueryPerformanceCounter(&now);
+    g_rec_ok = ok; g_show_t = now.QuadPart; g_show_tick = *(volatile DWORD *)0x4d0708;
+    g_pair_ok = g_rec_ok && g_prev_ok && g_tag_on && g_show_tick == g_prev_tick + 1 && g_show_t > g_prev_t;
+    if (g_pair_ok) pair_prepare();
     g_rec_bad = 0;
-    rec_start();
 }
 static int pr_proj;                                  // diagnóstico do HUD: última projeção (1 glOrtho, 2 glFrustum, 3 glLoadMatrix)
 static float g_ortho_h = 1440; static int g_ortho_up = 1;   // altura e sentido do último glOrtho (sombra do HUD)
@@ -448,8 +513,9 @@ static void clear_bars(void) {
         if (on) r_Enable(GL_SCISSOR_TEST); else r_Disable(GL_SCISSOR_TEST);
     }
 }
+static int g_swap_skipped;   // a troca do jogo não mostrou o quadro (60 fps: quem mostra é o mod)
 static void after_swap(void) {
-    g_frames++;
+    if (g_swap_skipped) g_swap_skipped = 0; else g_frames++;
     pr_tick(); sh_tick(); fp_frame_end();
     mc_frame_end();
     clear_bars();
@@ -472,7 +538,7 @@ static void after_swap(void) {
     }
     icons_sync();
     if (cfg.debug) debug_keys();
-    rec_finish();
+    rec_start();
 }
 
 // ---- framebuffer interno: MSAA + supersampling sem mexer no formato de pixel da janela
@@ -935,8 +1001,18 @@ static void shot_save(const char *suffix) {
     free(px);
 }
 static HDC g_swap_dc; static int g_swap_gdi;   // última troca do jogo (os quadros extras trocam do mesmo jeito)
-static BOOL WINAPI h_wglSwapBuffers(HDC dc) { g_swap_dc = dc; g_swap_gdi = 0; fbo_present(); shot_check(); BOOL r = r_wglSwapBuffers(dc); fbo_rebind(); after_swap(); return r; }
-static BOOL WINAPI h_SwapBuffersGdi(HDC dc) { g_swap_dc = dc; g_swap_gdi = 1; fbo_present(); shot_check(); BOOL r = r_SwapBuffersGdi(dc); fbo_rebind(); after_swap(); return r; }
+static int ip_active(void);
+static int g_pacer_ran;      // a espera do jogo (0x415700) passou desde a última troca: estamos no laço da partida
+// com a interpolação ativa, o quadro do jogo não é mostrado: os quadros saem todos do mod (bbfix_pacer), 1 tick atrás
+static int swap_skip(void) {
+    rec_close();
+    int skip = g_pacer_ran && ip_active();
+    g_pacer_ran = 0;
+    if (skip) { g_swap_skipped = 1; after_swap(); }
+    return skip;
+}
+static BOOL WINAPI h_wglSwapBuffers(HDC dc) { g_swap_dc = dc; g_swap_gdi = 0; if (swap_skip()) return TRUE; fbo_present(); shot_check(); BOOL r = r_wglSwapBuffers(dc); fbo_rebind(); after_swap(); return r; }
+static BOOL WINAPI h_SwapBuffersGdi(HDC dc) { g_swap_dc = dc; g_swap_gdi = 1; if (swap_skip()) return TRUE; fbo_present(); shot_check(); BOOL r = r_SwapBuffersGdi(dc); fbo_rebind(); after_swap(); return r; }
 
 // ----- MSAA: escolhe um formato multisample via WGL_ARB_pixel_format com um contexto temporário
 #define WGL_DRAW_TO_WINDOW_ARB 0x2001
@@ -2104,6 +2180,7 @@ static void fp_vtx(const GLfloat *p, float x, float y, float z, void *ret) {
     float f[6] = { x, y, z, pr_cur_tc[0], pr_cur_tc[1], fp_q };
     fp_add(FP_VTX, 0, (DWORD)p, (DWORD)ret, f, 6);
 }
+static void gp_plan(void);
 static void fp_write(void) {
     char path[MAX_PATH]; int k = 1;
     for (; k < 100; k++) {
@@ -2117,8 +2194,11 @@ static void fp_write(void) {
     fwrite(fp_buf, sizeof(FP_REC), (size_t)fp_n, f);
     fclose(f);
     logf_("F5: medicao dos 60 fps gravada em %s (%d quadros, %d registros, %d perdidos)", path, FP_FRAMES, fp_n, fp_lost);
+    gp_plan();
 }
+static void gp_frame_end(void);
 static void fp_frame_end(void) {
+    gp_frame_end();
     if (fp_state == 1) {                                 // começa no próximo quadro inteiro
         if (!fp_buf) fp_buf = malloc(sizeof(FP_REC) * (size_t)FP_MAX);
         if (!fp_buf) { fp_state = 0; logf_("F5: sem memoria para a medicao"); return; }
@@ -2132,6 +2212,86 @@ static void fp_frame_end(void) {
     LARGE_INTEGER fq; QueryPerformanceFrequency(&fq); memcpy(f + 2, &fq, 8);
     fp_add(FP_SWAP, 0, *(volatile DWORD *)0x4d0708, *(volatile DWORD *)0x4d0710, f, 4);   // contadores de quadros e de pulos do jogo
     if (++fp_frame >= FP_FRAMES) { fp_state = 0; fp_write(); }
+}
+// ---------------------------------------------------------------- sonda do pool (60 fps, etapa 2; debug=1, F5)
+// Depois da medição do F5, as páginas do pool de vértices (faixa dos ponteiros do último quadro gravado) ficam com
+// PAGE_GUARD durante um quadro do jogo: cada acesso vira uma exceção, o mod anota a instrução (EIP), se leu ou escreveu
+// e a faixa de endereços, e protege a página de novo depois de um passo único. Também procura, na imagem do exe,
+// variáveis que apontam para o pool. Tudo vai para o log ("pool:"). Serve para achar as funções que escrevem os pontos.
+#define GP_MAXE 512
+static volatile int gp_state;                     // 0 parado, 1 armar no próximo quadro, 2 vigiando
+static DWORD gp_lo, gp_hi, gp_plo, gp_phi;         // faixa do pool e páginas
+static volatile DWORD gp_rearm;
+static volatile LONG gp_hits;
+static struct { DWORD eip, nw, nr, alo, ahi; } gp_e[GP_MAXE];
+static int gp_ne, gp_lost;
+static PVOID gp_vh;
+static LONG CALLBACK gp_veh(EXCEPTION_POINTERS *e) {
+    DWORD code = e->ExceptionRecord->ExceptionCode;
+    if (code == STATUS_GUARD_PAGE_VIOLATION && e->ExceptionRecord->NumberParameters >= 2) {
+        DWORD a = (DWORD)e->ExceptionRecord->ExceptionInformation[1];
+        if (a < gp_plo || a >= gp_phi) return EXCEPTION_CONTINUE_SEARCH;
+        if (gp_state == 2 && a >= gp_lo && a < gp_hi) {
+            DWORD eip = e->ContextRecord->Eip; int wr = e->ExceptionRecord->ExceptionInformation[0] == 1;
+            int i = 0;
+            while (i < gp_ne && gp_e[i].eip != eip) i++;
+            if (i == gp_ne) {
+                if (gp_ne < GP_MAXE) { gp_e[i].eip = eip; gp_e[i].nw = gp_e[i].nr = 0; gp_e[i].alo = gp_e[i].ahi = a; gp_ne++; }
+                else { gp_lost++; i = -1; }
+            }
+            if (i >= 0) { if (wr) gp_e[i].nw++; else gp_e[i].nr++; if (a < gp_e[i].alo) gp_e[i].alo = a; if (a > gp_e[i].ahi) gp_e[i].ahi = a; }
+        }
+        if (gp_state == 2 && InterlockedIncrement(&gp_hits) < 400000) { gp_rearm = a & ~0xfffu; e->ContextRecord->EFlags |= 0x100; }
+        return EXCEPTION_CONTINUE_EXECUTION;       // a guarda desta página já saiu sozinha
+    }
+    if (code == EXCEPTION_SINGLE_STEP && gp_rearm) {
+        DWORD old; VirtualProtect((void *)(ULONG_PTR)gp_rearm, 4096, PAGE_READWRITE | PAGE_GUARD, &old); gp_rearm = 0;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+static void gp_protect(DWORD prot) {
+    DWORD old; int ok = 0;
+    for (DWORD pg = gp_plo; pg < gp_phi; pg += 4096) ok += VirtualProtect((void *)(ULONG_PTR)pg, 4096, prot, &old) != 0;
+    if (prot & PAGE_GUARD) logf_("pool: %d de %lu paginas vigiadas", ok, (gp_phi - gp_plo) / 4096);
+}
+static void gp_report(void) {
+    logf_("pool: faixa %08lx-%08lx, %ld acessos no quadro, %d instrucoes (%d sem lugar)", gp_lo, gp_hi, gp_hits, gp_ne, gp_lost);
+    for (int pass = 0; pass < 2; pass++)            // primeiro as que escrevem, depois as que só leem
+        for (int i = 0; i < gp_ne; i++)
+            if ((pass == 0) == (gp_e[i].nw > 0))
+                logf_("pool: eip %08lx escritas %lu leituras %lu enderecos %08lx-%08lx", gp_e[i].eip, gp_e[i].nw, gp_e[i].nr, gp_e[i].alo, gp_e[i].ahi);
+    HMODULE m = GetModuleHandleA(NULL);               // variáveis do exe que apontam para o pool (ou logo depois dele)
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((BYTE *)m + ((IMAGE_DOS_HEADER *)m)->e_lfanew);
+    const DWORD *p = (const DWORD *)m, *end = (const DWORD *)((BYTE *)m + nt->OptionalHeader.SizeOfImage);
+    int n = 0;
+    for (; p < end && n < 60; p++)
+        if (*p >= gp_lo - 0x10000 && *p < gp_hi + 0x10000) { logf_("pool: [%08lx] = %08lx", (DWORD)(ULONG_PTR)p, *p); n++; }
+}
+static void gp_frame_end(void) {
+    if (gp_state == 1) {
+        if (!gp_vh) gp_vh = AddVectoredExceptionHandler(1, gp_veh);
+        gp_ne = gp_lost = 0; gp_hits = 0; gp_state = 2;
+        gp_protect(PAGE_READWRITE | PAGE_GUARD);
+    } else if (gp_state == 2) {
+        gp_state = 0;
+        gp_protect(PAGE_READWRITE);
+        gp_rearm = 0;
+        gp_report();
+    }
+}
+// faixa do pool: ponteiros de vértice (heap) do último quadro gravado pelo F5
+static void gp_plan(void) {
+    DWORD lo = 0xffffffff, hi = 0;
+    for (int i = 0; i < fp_n; i++)
+        if (fp_buf[i].type == FP_VTX && fp_buf[i].frame == FP_FRAMES - 1 && fp_buf[i].ptr >= 0x01000000) {
+            if (fp_buf[i].ptr < lo) lo = fp_buf[i].ptr;
+            if (fp_buf[i].ptr + 16 > hi) hi = fp_buf[i].ptr + 16;
+        }
+    if (hi <= lo) { logf_("pool: nenhum ponteiro de vertice na heap"); return; }
+    gp_lo = lo; gp_hi = hi; gp_plo = lo & ~0xfffu; gp_phi = (hi + 0xfff) & ~0xfffu;
+    if (gp_phi - gp_plo > 0x1000000) { logf_("pool: faixa grande demais (%08lx-%08lx), sonda cancelada", lo, hi); return; }
+    gp_state = 1;
 }
 static void APIENTRY h_BindTexture(GLenum t, GLuint n) { rec(GR_BIND, t, n, 0, NULL, 0); if (t == GL_TEXTURE_2D) { pr_tex = n; pr_kind = hud_tex_kind(n); fp_add(FP_BIND, 0, n, (DWORD)__builtin_return_address(0), NULL, 0); } r_BindTexture(t, n); }
 static void APIENTRY h_Begin(GLenum m) {
@@ -2325,6 +2485,120 @@ static void replay_cmd(const GR_CMD *c, void *ctx) {
     }
 }
 
+// ---------------------------------------------------------------- 60 fps (etapa 2): par de ticks e repetição interpolada
+// A cada tick novo (rec_finish), os vértices de B com chave são casados com os de A. Objeto (bloco/malha e ocorrência)
+// com algum ponto sem par ou com salto grande (corte de câmera, teletransporte) sai inteiro como em B, para não esticar
+// triângulos. Salto: distância no espaço de vista > 0,5·|z| + fps_jump (unidades do mundo; K = [0x639eb4]).
+#define IP_MAPCAP 262144       // potência de 2 > 2·REC_CAP
+static int *g_ip_a, *g_ip_tc;  // por comando de B: vértice casado em A (−1 = como em B); TEXCOORD -> vértice seguinte
+static IP_MAP g_map_a, g_map_bad;
+static double g_ip_alpha;
+static int g_ip_tint;          // debug F2: pinta o que não é interpolado (vermelho = sem par ou salto, azul = sem chave)
+static int *g_ip_col;          // por comando de B: GR_COLOR -> vértice seguinte (para a pintura do F2)
+static float (*g_syn)[3]; static int g_syn_n;   // pontos de A calculados pela câmera de A (g_ip_a >= g_pt_prev.n)
+static struct { long ticks, vtx, keyed, nopair, jump, interp, bad_objs, synth, synth_bad, cam_off; } g_ip_st;   // debug: contagens a cada ~5 s
+static int pair_alloc(void) {
+    g_ip_a = malloc(sizeof(int) * REC_CAP); g_ip_tc = malloc(sizeof(int) * REC_CAP); g_ip_col = malloc(sizeof(int) * REC_CAP);
+    g_syn = malloc(sizeof(float[3]) * REC_CAP); if (!g_syn) return 0;
+    unsigned *k = malloc(sizeof(unsigned) * 2 * (IP_MAPCAP + 8192)); int *v = malloc(sizeof(int) * (IP_MAPCAP + 8192));
+    for (int i = 0; i < 3; i++) { PT_TAB *t = i == 0 ? &g_pt_rec : i == 1 ? &g_pt_show : &g_pt_prev; t->e = malloc(sizeof(PT_ENT) * TAG_CAP); t->n = 0; if (!t->e) return 0; }
+    if (!g_ip_a || !g_ip_tc || !g_ip_col || !k || !v) return 0;
+    ip_map_init(&g_map_a, k, k + IP_MAPCAP, v, IP_MAPCAP);
+    ip_map_init(&g_map_bad, k + 2 * IP_MAPCAP, k + 2 * IP_MAPCAP + 8192, v + IP_MAPCAP, 8192);
+    return 1;
+}
+// ponto do cenário de B sem par em A (o bloco entrou no campo de visão agora: o jogo só transforma os blocos que a
+// câmera vê, 0x4052b0/0x409950). O cenário é parado: refaz a conta do jogo com a câmera de A. Antes confere a de B:
+// se a conta não der o ponto gravado em B, a suposição não vale e o ponto fica sem par.
+static int near_f(double a, double b) { return fabs(a - b) <= 1e-3 * fabs(b) + 1e-2; }
+static int room_synth(const GR_CMD *c, float out[3]) {
+    DWORD start = G_POOL, a = c->u[0];
+    if (!g_cam_prev.ok || !g_cam_show.ok || !start || a < start || a >= start + TAG_CAP * 16 || ((a - start) & 15)) return 0;
+    DWORD sl = (a - start) >> 4;
+    if (g_tag_fr[sl] != g_tag_frame || !g_tag_room[sl] || g_tag_k0[sl] != c->u[1] || g_tag_k1[sl] + 1 != c->u[2]) return 0;
+    const BYTE *blk = (const BYTE *)(ULONG_PTR)c->u[1];
+    unsigned i = (c->u[2] - 1) & 0x3FFF;
+    if (i >= *(const DWORD *)(blk + 0x10)) return 0;
+    const short *v = (const short *)(blk + 0x2c + 8 * i);
+    float b[3];
+    if (!ip_room_point(g_cam_show.m, g_cam_show.K, g_cam_show.sent, v, b) ||
+        !near_f(b[0], c->d[0]) || !near_f(b[1], c->d[1]) || !near_f(b[2], c->d[2])) { g_ip_st.synth_bad++; return 0; }
+    return ip_room_point(g_cam_prev.m, g_cam_prev.K, g_cam_prev.sent, v, out);
+}
+static void pair_prepare(void) {
+    const GR_CMD *B = g_show.cmd;
+    const PT_ENT *A = g_pt_prev.e;
+    int na = g_pt_prev.n, nb = g_show.n, ok = 1;
+    ip_map_clear(&g_map_a); ip_map_clear(&g_map_bad);
+    for (int i = 0; i < na; i++) ok &= ip_map_put(&g_map_a, A[i].k0, A[i].k1, i);
+    if (!ok) { g_pair_ok = 0; return; }                  // mais pontos que o mapa: sem interpolação neste tick
+    double K = *(volatile float *)0x639eb4;
+    if (!(K > 0)) K = 1;
+    float sent = -*(volatile float *)0x639ebc;           // z que o cenário grava para ponto atrás da câmera
+    g_syn_n = 0;
+    if (!g_cam_prev.ok || !g_cam_show.ok) g_ip_st.cam_off++;
+    for (int i = 0; i < nb; i++) {
+        g_ip_a[i] = g_ip_tc[i] = g_ip_col[i] = -1;
+        if (B[i].op == GR_VERTEX) g_ip_st.vtx++;
+        if (B[i].op != GR_VERTEX || !B[i].u[2]) continue;
+        g_ip_st.keyed++;
+        unsigned obj = ip_key_obj(B[i].u[2] - 1);         // ocorrência do bloco/malha no quadro
+        int j = ip_map_get(&g_map_a, B[i].u[1], B[i].u[2]);
+        float syn[3]; const float *a;
+        if (j >= 0) a = A[j].p;
+        else if (room_synth(&B[i], syn)) { a = syn; j = na + g_syn_n; }
+        else { g_ip_st.nopair++; ip_map_put(&g_map_bad, B[i].u[1], obj, 1); continue; }
+        float b[3] = { (float)B[i].d[0], (float)B[i].d[1], (float)B[i].d[2] };
+        if (ip_behind(a[2], sent) || ip_behind(b[2], sent)) continue;   // atrás da câmera: este ponto sai como em B
+        if (ip_dist(a, b) / K > 0.5 * fabs(b[2]) + cfg.fps_jump) { g_ip_st.jump++; ip_map_put(&g_map_bad, B[i].u[1], obj, 1); continue; }
+        if (a == syn) { memcpy(g_syn[g_syn_n++], syn, sizeof syn); g_ip_st.synth++; }
+        g_ip_a[i] = j;
+    }
+    if (g_map_bad.n)
+        for (int i = 0; i < nb; i++)
+            if (g_ip_a[i] >= 0 && ip_map_get(&g_map_bad, B[i].u[1], ip_key_obj(B[i].u[2] - 1)) >= 0) g_ip_a[i] = -1;
+    for (int i = nb - 1, next = -1; i >= 0; i--) {        // TEXCOORD/COLOR -> vértice seguinte do mesmo glBegin
+        unsigned op = B[i].op;
+        if (op == GR_VERTEX) next = i;
+        else if (op == GR_BEGIN || op == GR_END) next = -1;
+        else if (op == GR_TEXCOORD) g_ip_tc[i] = next;
+        else if (op == GR_COLOR) g_ip_col[i] = next;
+    }
+    g_ip_st.bad_objs += g_map_bad.n; g_ip_st.ticks++;
+    for (int i = 0; i < nb; i++) if (g_ip_a[i] >= 0) g_ip_st.interp++;
+    if (cfg.debug && g_ip_st.ticks >= 150) {
+        logf_("fps: em %ld ticks: %ld vertices, %ld com chave, %ld sem par, %ld com salto, %ld interpolados (%.1f%%), %ld objetos fora; "
+              "cenario pela camera: %ld pontos, %ld nao conferem, %ld ticks sem camera",
+              g_ip_st.ticks, g_ip_st.vtx, g_ip_st.keyed, g_ip_st.nopair, g_ip_st.jump, g_ip_st.interp,
+              g_ip_st.vtx ? 100.0 * g_ip_st.interp / g_ip_st.vtx : 0.0, g_ip_st.bad_objs, g_ip_st.synth, g_ip_st.synth_bad, g_ip_st.cam_off);
+        memset(&g_ip_st, 0, sizeof g_ip_st);
+    }
+}
+static void ip_point(int vb, float o[3]) {               // vértice vb de B, interpolado com o par em A
+    const GR_CMD *b = &g_show.cmd[vb];
+    float fb[3] = { (float)b->d[0], (float)b->d[1], (float)b->d[2] };
+    int j = g_ip_a[vb];
+    ip_vertex(j < g_pt_prev.n ? g_pt_prev.e[j].p : g_syn[j - g_pt_prev.n], fb, g_ip_alpha, o);
+}
+static void replay_cmd_ip(const GR_CMD *c, void *ctx) {
+    int i = (int)(c - g_show.cmd);
+    if (g_ip_tint && c->op == GR_COLOR && g_ip_col[i] >= 0 && g_ip_a[g_ip_col[i]] < 0) {
+        int keyed = g_show.cmd[g_ip_col[i]].u[2] != 0;
+        h_Color4f(keyed ? 1.f : 0.2f, 0.2f, keyed ? 0.2f : 1.f, (GLfloat)c->d[3]);
+        return;
+    }
+    if (c->op == GR_VERTEX && g_ip_a[i] >= 0) { float o[3]; ip_point(i, o); h_Vertex3fv(o); return; }
+    if (c->op == GR_TEXCOORD && g_ip_tc[i] >= 0 && g_ip_a[g_ip_tc[i]] >= 0) {
+        float o[3]; double t[4]; ip_point(g_ip_tc[i], o); ip_texcoord(c->d, o[2], t);
+        h_TexCoord4f((GLfloat)t[0], (GLfloat)t[1], (GLfloat)t[2], (GLfloat)t[3]);
+        return;
+    }
+    replay_cmd(c, ctx);
+}
+static void replay_ip(double alpha) {
+    g_ip_alpha = alpha < 0 ? 0 : alpha > 1 ? 1 : alpha;
+    g_replaying = 1; gr_replay(&g_show, replay_cmd_ip, NULL); g_replaying = 0;
+}
 // ---------------------------------------------------------------- 60 fps (etapa 1): quadros extras na espera do jogo
 // O jogo chama a espera 0x415700 no fim de cada tick (0x4013a1). Antes dela, até o prazo do tick, o mod repete o
 // instantâneo do desenho pelos ganchos e troca o quadro, nos horários de pacer_next. Prazo do tick anterior (= início
@@ -2333,13 +2607,35 @@ static int g_extra_off;   // debug: F3 desliga os quadros extras
 static void present_extra(void) {
     fbo_present();
     if (g_shot_r) { g_shot_r = 0; shot_save("_r"); }
+    else shot_check();
     if (g_swap_gdi) r_SwapBuffersGdi(g_swap_dc); else r_wglSwapBuffers(g_swap_dc);
     fbo_rebind();
     clear_bars();
     g_frames++;
 }
+static int ip_active(void) { return g_rec_on && g_tag_on && !g_extra_off && g_pair_ok && g_swap_dc && !(g_hwnd && IsIconic(g_hwnd)); }
+static double ip_alpha_now(void) {                     // posição entre A e B, pelo tempo desde o fim de B
+    LARGE_INTEGER now; QueryPerformanceCounter(&now);
+    double span = (double)(g_show_t - g_prev_t);
+    return span > 0 ? (double)(now.QuadPart - g_show_t) / span : 1;
+}
 static void __cdecl bbfix_pacer(void) {
-    if (g_rec_on && g_rec_ok && !g_extra_off && g_swap_dc && !*(volatile DWORD *)0x4d07f8 && !(g_hwnd && IsIconic(g_hwnd))) {
+    g_pacer_ran = 1;
+    if (ip_active()) {                                   // etapa 2: quadro logo agora e os da grade, interpolados
+        static LONGLONG g0, freq, period;
+        if (!freq) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); freq = f.QuadPart; period = pacer_period(freq, cfg.fps); }
+        LONGLONG start = *(volatile LONGLONG *)0x639b10, end = start + *(volatile LONGLONG *)0x639af0, margin = freq / 500, t;
+        if (!g0) g0 = start;
+        replay_ip(ip_alpha_now()); present_extra();
+        LARGE_INTEGER now; QueryPerformanceCounter(&now);
+        LONGLONG after = now.QuadPart;
+        while (!*(volatile DWORD *)0x4d07f8 && (t = pacer_next(g0, period, start, after, end, margin)) >= 0) {
+            do { QueryPerformanceCounter(&now); if (now.QuadPart < t) YieldProcessor(); } while (now.QuadPart < t);
+            replay_ip(ip_alpha_now()); present_extra();
+            QueryPerformanceCounter(&now);
+            after = now.QuadPart > t ? now.QuadPart : t;
+        }
+    } else if (g_rec_on && g_rec_ok && !g_extra_off && g_swap_dc && !*(volatile DWORD *)0x4d07f8 && !(g_hwnd && IsIconic(g_hwnd))) {
         static LONGLONG g0, freq, period;
         if (!freq) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); freq = f.QuadPart; period = pacer_period(freq, cfg.fps); }
         LONGLONG start = *(volatile LONGLONG *)0x639b10, end = start + *(volatile LONGLONG *)0x639af0, margin = freq / 500, t;
@@ -2355,6 +2651,74 @@ static void __cdecl bbfix_pacer(void) {
         }
     }
     ((void (*)(void))0x415700)();
+}
+// ---------------------------------------------------------------- 60 fps (etapa 2): marcação das chaves no pool
+static struct { DWORD p, fr; unsigned n; } g_occ[1024];   // ocorrências de cada bloco/malha no quadro
+static void tag_new_frame(void) { g_tag_frame++; }
+static unsigned tag_occ(DWORD p) {
+    unsigned h = (p * 2654435761u) >> 22;
+    for (int k = 0; k < 64; k++, h = (h + 1) & 1023) {
+        if (g_occ[h].fr != g_tag_frame) { g_occ[h].p = p; g_occ[h].fr = g_tag_frame; g_occ[h].n = 0; return 0; }
+        if (g_occ[h].p == p) return ++g_occ[h].n;
+    }
+    return 0xffff;                                       // tabela cheia: chave fraca (o par falha e o objeto sai de B)
+}
+static int __cdecl bbfix_room(void *blk) {             // 0x405470(bloco*): o ponto i do bloco vai para a posição usada + i
+    const float *cm = (const float *)0x63c020;
+    if (*(volatile DWORD *)0x4d085c != 0x4095e0) g_cam_rec.ok = 0, g_cam_rec.seen = 1;
+    else if (!g_cam_rec.seen) {
+        memcpy(g_cam_rec.m, cm, sizeof g_cam_rec.m);
+        g_cam_rec.K = *(volatile float *)0x639eb4; g_cam_rec.sent = -*(volatile float *)0x639ebc; g_cam_rec.ok = g_cam_rec.seen = 1;
+    } else if (memcmp(g_cam_rec.m, cm, sizeof g_cam_rec.m)) g_cam_rec.ok = 0;
+    if (blk && G_POOL) {
+        DWORD first = G_POOL_USED, n = *(volatile DWORD *)((BYTE *)blk + 0x10), oc = tag_occ((DWORD)(ULONG_PTR)blk);
+        for (DWORD i = 0; i < n && i < 0x4000; i++) tag_slot(first + i, (unsigned)(ULONG_PTR)blk, ip_key1(oc, n, i), 1);
+    }
+    return ((int (__cdecl *)(void *))0x405470)(blk);
+}
+// malha = { vértices*, n }; vértice de 8 bytes, posição no pool na palavra +6. A chave é o nó da peça (o objeto do jogo
+// que aponta para a malha em +0xc): a animação troca a malha do nó, o nó fica. Os chamadores têm o nó em esi ou edi;
+// os stubs em assembly abaixo guardam o registro antes de seguir para bbfix_mesh_a/b.
+DWORD bbfix_mesh_node, bbfix_mesh_aux;   // aux: esi do chamador de 0x464721 (a estrutura cujo +0 é o objeto atual)
+static void tag_mesh(void *mesh) {
+    if (!mesh || !G_POOL || !bbfix_mesh_node) return;
+    BYTE here;                                             // em 0x464721 o nó é uma cópia na pilha (igual para todos os
+    if (bbfix_mesh_aux && bbfix_mesh_node - (DWORD)(ULONG_PTR)&here < 0x100000)   // objetos): a chave vira o objeto
+        bbfix_mesh_node = *(volatile DWORD *)(ULONG_PTR)bbfix_mesh_aux;
+    if (!bbfix_mesh_node) return;
+    const BYTE *v = *(BYTE *const *)mesh; int n = ((const int *)mesh)[1];
+    DWORD base = G_POOL_OBJ, start = G_POOL;
+    if (!v || n <= 0 || base < start) return;
+    DWORD b = (base - start) >> 4, oc = tag_occ(bbfix_mesh_node);
+    for (int i = 0; i < n && i < 0x4000; i++) tag_slot(b + (*(const WORD *)(v + 8 * i + 6) & 0x7fff), (unsigned)bbfix_mesh_node, ip_key1(oc, (unsigned)n, (unsigned)i), 0);
+}
+int __cdecl bbfix_mesh_a(void *mesh, int a, int b);
+int __cdecl bbfix_mesh_b(void *mesh);
+int __cdecl bbfix_mesh_a(void *mesh, int a, int b) { tag_mesh(mesh); bbfix_mesh_node = bbfix_mesh_aux = 0; return ((int (__cdecl *)(void *, int, int))0x406d90)(mesh, a, b); }
+int __cdecl bbfix_mesh_b(void *mesh) { tag_mesh(mesh); bbfix_mesh_node = bbfix_mesh_aux = 0; return ((int (__cdecl *)(void *))0x406df0)(mesh); }
+void bbfix_stub_a_edi(void); void bbfix_stub_a_esi(void); void bbfix_stub_b_esi(void);
+__asm__(".text\n"
+        ".globl _bbfix_stub_a_edi\n_bbfix_stub_a_edi:\n\tmovl %edi, _bbfix_mesh_node\n\tmovl %esi, _bbfix_mesh_aux\n\tjmp _bbfix_mesh_a\n"
+        ".globl _bbfix_stub_a_esi\n_bbfix_stub_a_esi:\n\tmovl %esi, _bbfix_mesh_node\n\tjmp _bbfix_mesh_a\n"
+        ".globl _bbfix_stub_b_esi\n_bbfix_stub_b_esi:\n\tmovl %esi, _bbfix_mesh_node\n\tjmp _bbfix_mesh_b\n");
+// troca um "call alvo" (E8) do jogo por "call fn", conferindo o alvo antes
+static int patch_call(DWORD site, DWORD expect, void *fn) {
+    BYTE *p = (BYTE *)site;
+    if (p[0] != 0xE8 || site + 5 + *(DWORD *)(p + 1) != expect) { logf_("patch %08lx: chamada inesperada, ignorado", site); return 0; }
+    DWORD rel = (DWORD)(ULONG_PTR)fn - (site + 5), old;
+    VirtualProtect(p + 1, 4, PAGE_EXECUTE_READWRITE, &old); memcpy(p + 1, &rel, 4); VirtualProtect(p + 1, 4, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), p, 5);
+    return 1;
+}
+static void install_tags(void) {
+    if (!g_rec_on) return;
+    static const DWORD rooms[] = { 0x4052df, 0x405314, 0x405349, 0x40537e, 0x4053b3, 0x4053e8, 0x405419, 0x405459 };
+    int ok = 1;
+    for (size_t i = 0; i < sizeof rooms / sizeof *rooms; i++) ok &= patch_call(rooms[i], 0x405470, (void *)bbfix_room);
+    ok &= patch_call(0x464721, 0x406d90, (void *)bbfix_stub_a_edi) & patch_call(0x469b16, 0x406d90, (void *)bbfix_stub_a_esi);   // nó em edi / esi
+    ok &= patch_call(0x463f62, 0x406df0, (void *)bbfix_stub_b_esi) & patch_call(0x469ad5, 0x406df0, (void *)bbfix_stub_b_esi);
+    g_tag_on = ok;
+    logf_("fps: chaves do pool %s", ok ? "ligadas (cenario e modelos)" : "DESLIGADAS (chamada inesperada): sem interpolacao");
 }
 static void install_pacer(void) {
     if (!g_rec_on) return;
@@ -4748,6 +5112,10 @@ static void debug_keys(void) {
         else logf_("F7: tipo %d (cat %02x id %04x) com o alcance ORIGINAL", g_rexcl, g_rtypes[g_rexcl].cat, g_rtypes[g_rexcl].id);
     }
     prev7 = d7;
+    static int prev2;
+    int d2 = (GetAsyncKeyState(VK_F2) & 0x8000) != 0;
+    if (d2 && !prev2 && g_rec_on) { g_ip_tint = !g_ip_tint; logf_("F2: pintura do que nao e interpolado %s", g_ip_tint ? "LIGADA" : "desligada"); }
+    prev2 = d2;
     static int prev3;
     int d3 = (GetAsyncKeyState(VK_F3) & 0x8000) != 0;
     if (d3 && !prev3 && g_rec_on) { g_extra_off = !g_extra_off; logf_("F3: quadros extras %s", g_extra_off ? "DESLIGADOS" : "ligados"); }
@@ -4906,6 +5274,7 @@ static void init(HMODULE self) {
     logf_("config: aspect=%d msaa=%d vsync=%d xinput=%d unlock_dinput_joystick=%d analog_joystick=%d right_stick_partner=%d fps=%d", cfg.aspect, cfg.msaa, cfg.vsync, cfg.xinput, cfg.unlock_joy, aj.on, aj.partner, cfg.fps);
     rec_init();
     install_pacer();
+    install_tags();
 }
 
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID r) {
