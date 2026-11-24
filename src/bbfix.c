@@ -325,21 +325,16 @@ static void rec_col(double r, double g, double b, double a) { double d[4] = { r,
 #define G_POOL_OBJ (*(volatile DWORD *)0x4d0848)
 #define G_POOL_USED (*(volatile DWORD *)0x4d084c)
 static unsigned g_tag_k0[TAG_CAP], g_tag_k1[TAG_CAP], g_tag_fr[TAG_CAP], g_tag_frame = 1;
-static unsigned char g_tag_room[TAG_CAP];             // 1 = ponto do cenário (k0 = bloco), 0 = de malha (k0 = nó)
 static int g_tag_on;
 static DWORD g_tag_list[TAG_CAP]; static int g_tag_n;   // posições marcadas neste quadro
-static void tag_slot(DWORD slot, unsigned k0, unsigned k1, int room) {
+static void tag_slot(DWORD slot, unsigned k0, unsigned k1) {
     if (slot >= TAG_CAP) return;
     if (g_tag_fr[slot] != g_tag_frame) { g_tag_fr[slot] = g_tag_frame; g_tag_list[g_tag_n++] = slot; }
-    g_tag_k0[slot] = k0; g_tag_k1[slot] = k1; g_tag_room[slot] = (unsigned char)room;
+    g_tag_k0[slot] = k0; g_tag_k1[slot] = k1;
 }
-// câmera do cenário em cada tick: a matriz 0x63c020 que 0x4095e0 passa para 0x408990, lida no primeiro bloco do
-// tick. ok = 0 se o tick usou outra projeção (0x409610) ou a matriz mudou entre blocos (tela dividida, por exemplo).
-typedef struct { float m[12], K, sent; int ok, seen; } CAM_SNAP;
-static CAM_SNAP g_cam_rec, g_cam_show, g_cam_prev;
 // tabela do pool de cada instantâneo: todos os pontos com chave do quadro, desenhados ou não (o casamento de A usa
 // esta tabela: um triângulo que só aparece em B ainda acha os pontos dele em A)
-typedef struct { unsigned k0, k1; float p[3]; } PT_ENT;
+typedef struct { unsigned k0, k1; float p[3]; int inv; } PT_ENT;   // inv: o jogo marcou o ponto invisível
 typedef struct { PT_ENT *e; int n; } PT_TAB;
 static PT_TAB g_pt_rec, g_pt_show, g_pt_prev;
 static void pt_capture(PT_TAB *t) {                    // no fim do quadro, o pool ainda tem os pontos deste quadro
@@ -349,9 +344,9 @@ static void pt_capture(PT_TAB *t) {                    // no fim do quadro, o po
     for (int i = 0; i < g_tag_n; i++) {
         DWORD sl = g_tag_list[i];
         const DWORD *q = (const DWORD *)(ULONG_PTR)(start + sl * 16);
-        if (q[0] == 0x7f7fffff || q[0] == 0x8fffffff) continue;   // marcado invisível pelo jogo
         PT_ENT *e = &t->e[t->n++];
         e->k0 = g_tag_k0[sl]; e->k1 = g_tag_k1[sl] + 1;
+        e->inv = q[0] == 0x7f7fffff || q[0] == 0x8fffffff;     // marcado invisível pelo jogo: não serve de par
         memcpy(e->p, q, 12);
     }
 }
@@ -385,7 +380,7 @@ static void tag_new_frame(void);
 static void rec_start(void) {
     if (!g_rec_on) return;
     gr_reset(&g_rec); g_rec_draws = 0;
-    tag_new_frame(); g_tag_n = 0; g_cam_rec.ok = g_cam_rec.seen = 0;
+    tag_new_frame(); g_tag_n = 0;
     static const GLenum caps[] = { GL_BLEND, GL_DEPTH_TEST, GL_ALPHA_TEST, GL_TEXTURE_2D, GL_CULL_FACE, GL_SCISSOR_TEST };
     for (size_t i = 0; i < sizeof caps / sizeof *caps; i++) rec(glIsEnabled(caps[i]) ? GR_ENABLE : GR_DISABLE, caps[i], 0, 0, NULL, 0);
     GLint v[4] = { 0 }, w = 0; GLfloat f = 0; double d[4];
@@ -398,13 +393,14 @@ static void rec_start(void) {
     glGetIntegerv(GL_MATRIX_MODE, &w); rec(GR_MATRIXMODE, (unsigned)w, 0, 0, NULL, 0);
 }
 // fim do instantâneo (troca do jogo): A <- B <- gravado e casamento do par; o próximo começa no fim do after_swap
+static long g_rec_full;                                   // debug: ticks que não couberam no instantâneo
 static void rec_close(void) {
     if (!g_rec_on) return;
     int ok = g_rec.n > 0 && g_rec_draws > 0 && !g_rec.overflow && !g_rec_bad;   // tick sem desenho (pulado) não vale
+    if (g_rec.overflow) g_rec_full++;
     pt_capture(&g_pt_rec);
     GR_SNAP t = g_prev; g_prev = g_show; g_show = g_rec; g_rec = t;   // A <- B <- tick gravado; grava o próximo no antigo A
     PT_TAB pt = g_pt_prev; g_pt_prev = g_pt_show; g_pt_show = g_pt_rec; g_pt_rec = pt;
-    CAM_SNAP cs = g_cam_prev; g_cam_prev = g_cam_show; g_cam_show = g_cam_rec; g_cam_rec = cs;
     g_prev_ok = g_rec_ok; g_prev_t = g_show_t; g_prev_tick = g_show_tick;
     LARGE_INTEGER now; QueryPerformanceCounter(&now);
     g_rec_ok = ok; g_show_t = now.QuadPart; g_show_tick = *(volatile DWORD *)0x4d0708;
@@ -2493,37 +2489,20 @@ static void replay_cmd(const GR_CMD *c, void *ctx) {
 static int *g_ip_a, *g_ip_tc;  // por comando de B: vértice casado em A (−1 = como em B); TEXCOORD -> vértice seguinte
 static IP_MAP g_map_a, g_map_bad;
 static double g_ip_alpha;
-static int g_ip_tint;          // debug F2: pinta o que não é interpolado (vermelho = sem par ou salto, azul = sem chave)
+static int g_ip_tint;          // debug F2: pinta o que não é interpolado (cor pelo motivo, ver replay_cmd_ip)
 static int *g_ip_col;          // por comando de B: GR_COLOR -> vértice seguinte (para a pintura do F2)
-static float (*g_syn)[3]; static int g_syn_n;   // pontos de A calculados pela câmera de A (g_ip_a >= g_pt_prev.n)
-static struct { long ticks, vtx, keyed, nopair, jump, interp, bad_objs, synth, synth_bad, cam_off; } g_ip_st;   // debug: contagens a cada ~5 s
+static unsigned char *g_ip_why;   // debug F2: por que o vértice de B não foi interpolado (IP_W_*), para a cor da pintura
+enum { IP_W_OK, IP_W_NOPAIR, IP_W_INV, IP_W_BEHIND, IP_W_JUMP, IP_W_OBJ };
+static struct { long ticks, vtx, keyed, nopair, inv, behind, jump, interp, bad_objs, cmd_max; } g_ip_st;   // debug: contagens a cada ~5 s
 static int pair_alloc(void) {
     g_ip_a = malloc(sizeof(int) * REC_CAP); g_ip_tc = malloc(sizeof(int) * REC_CAP); g_ip_col = malloc(sizeof(int) * REC_CAP);
-    g_syn = malloc(sizeof(float[3]) * REC_CAP); if (!g_syn) return 0;
+    g_ip_why = malloc(REC_CAP); if (!g_ip_why) return 0;
     unsigned *k = malloc(sizeof(unsigned) * 2 * (IP_MAPCAP + 8192)); int *v = malloc(sizeof(int) * (IP_MAPCAP + 8192));
     for (int i = 0; i < 3; i++) { PT_TAB *t = i == 0 ? &g_pt_rec : i == 1 ? &g_pt_show : &g_pt_prev; t->e = malloc(sizeof(PT_ENT) * TAG_CAP); t->n = 0; if (!t->e) return 0; }
     if (!g_ip_a || !g_ip_tc || !g_ip_col || !k || !v) return 0;
     ip_map_init(&g_map_a, k, k + IP_MAPCAP, v, IP_MAPCAP);
     ip_map_init(&g_map_bad, k + 2 * IP_MAPCAP, k + 2 * IP_MAPCAP + 8192, v + IP_MAPCAP, 8192);
     return 1;
-}
-// ponto do cenário de B sem par em A (o bloco entrou no campo de visão agora: o jogo só transforma os blocos que a
-// câmera vê, 0x4052b0/0x409950). O cenário é parado: refaz a conta do jogo com a câmera de A. Antes confere a de B:
-// se a conta não der o ponto gravado em B, a suposição não vale e o ponto fica sem par.
-static int near_f(double a, double b) { return fabs(a - b) <= 1e-3 * fabs(b) + 1e-2; }
-static int room_synth(const GR_CMD *c, float out[3]) {
-    DWORD start = G_POOL, a = c->u[0];
-    if (!g_cam_prev.ok || !g_cam_show.ok || !start || a < start || a >= start + TAG_CAP * 16 || ((a - start) & 15)) return 0;
-    DWORD sl = (a - start) >> 4;
-    if (g_tag_fr[sl] != g_tag_frame || !g_tag_room[sl] || g_tag_k0[sl] != c->u[1] || g_tag_k1[sl] + 1 != c->u[2]) return 0;
-    const BYTE *blk = (const BYTE *)(ULONG_PTR)c->u[1];
-    unsigned i = (c->u[2] - 1) & 0x3FFF;
-    if (i >= *(const DWORD *)(blk + 0x10)) return 0;
-    const short *v = (const short *)(blk + 0x2c + 8 * i);
-    float b[3];
-    if (!ip_room_point(g_cam_show.m, g_cam_show.K, g_cam_show.sent, v, b) ||
-        !near_f(b[0], c->d[0]) || !near_f(b[1], c->d[1]) || !near_f(b[2], c->d[2])) { g_ip_st.synth_bad++; return 0; }
-    return ip_room_point(g_cam_prev.m, g_cam_prev.K, g_cam_prev.sent, v, out);
 }
 static void pair_prepare(void) {
     const GR_CMD *B = g_show.cmd;
@@ -2535,28 +2514,25 @@ static void pair_prepare(void) {
     double K = *(volatile float *)0x639eb4;
     if (!(K > 0)) K = 1;
     float sent = -*(volatile float *)0x639ebc;           // z que o cenário grava para ponto atrás da câmera
-    g_syn_n = 0;
-    if (!g_cam_prev.ok || !g_cam_show.ok) g_ip_st.cam_off++;
     for (int i = 0; i < nb; i++) {
-        g_ip_a[i] = g_ip_tc[i] = g_ip_col[i] = -1;
+        g_ip_a[i] = g_ip_tc[i] = g_ip_col[i] = -1; g_ip_why[i] = IP_W_OK;
         if (B[i].op == GR_VERTEX) g_ip_st.vtx++;
         if (B[i].op != GR_VERTEX || !B[i].u[2]) continue;
         g_ip_st.keyed++;
         unsigned obj = ip_key_obj(B[i].u[2] - 1);         // ocorrência do bloco/malha no quadro
         int j = ip_map_get(&g_map_a, B[i].u[1], B[i].u[2]);
-        float syn[3]; const float *a;
-        if (j >= 0) a = A[j].p;
-        else if (room_synth(&B[i], syn)) { a = syn; j = na + g_syn_n; }
-        else { g_ip_st.nopair++; ip_map_put(&g_map_bad, B[i].u[1], obj, 1); continue; }
-        float b[3] = { (float)B[i].d[0], (float)B[i].d[1], (float)B[i].d[2] };
-        if (ip_behind(a[2], sent) || ip_behind(b[2], sent)) continue;   // atrás da câmera: este ponto sai como em B
-        if (ip_dist(a, b) / K > 0.5 * fabs(b[2]) + cfg.fps_jump) { g_ip_st.jump++; ip_map_put(&g_map_bad, B[i].u[1], obj, 1); continue; }
-        if (a == syn) { memcpy(g_syn[g_syn_n++], syn, sizeof syn); g_ip_st.synth++; }
+        if (j < 0 || A[j].inv) {
+            if (j < 0) g_ip_st.nopair++; else g_ip_st.inv++;
+            g_ip_why[i] = j < 0 ? IP_W_NOPAIR : IP_W_INV; ip_map_put(&g_map_bad, B[i].u[1], obj, 1); continue;
+        }
+        const float *a = A[j].p; float b[3] = { (float)B[i].d[0], (float)B[i].d[1], (float)B[i].d[2] };
+        if (ip_behind(a[2], sent) || ip_behind(b[2], sent)) { g_ip_st.behind++; g_ip_why[i] = IP_W_BEHIND; continue; }   // atrás da câmera: sai como em B
+        if (ip_dist(a, b) / K > 0.5 * fabs(b[2]) + cfg.fps_jump) { g_ip_st.jump++; g_ip_why[i] = IP_W_JUMP; ip_map_put(&g_map_bad, B[i].u[1], obj, 1); continue; }
         g_ip_a[i] = j;
     }
     if (g_map_bad.n)
         for (int i = 0; i < nb; i++)
-            if (g_ip_a[i] >= 0 && ip_map_get(&g_map_bad, B[i].u[1], ip_key_obj(B[i].u[2] - 1)) >= 0) g_ip_a[i] = -1;
+            if (g_ip_a[i] >= 0 && ip_map_get(&g_map_bad, B[i].u[1], ip_key_obj(B[i].u[2] - 1)) >= 0) { g_ip_a[i] = -1; g_ip_why[i] = IP_W_OBJ; }
     for (int i = nb - 1, next = -1; i >= 0; i--) {        // TEXCOORD/COLOR -> vértice seguinte do mesmo glBegin
         unsigned op = B[i].op;
         if (op == GR_VERTEX) next = i;
@@ -2565,26 +2541,29 @@ static void pair_prepare(void) {
         else if (op == GR_COLOR) g_ip_col[i] = next;
     }
     g_ip_st.bad_objs += g_map_bad.n; g_ip_st.ticks++;
+    if (nb > g_ip_st.cmd_max) g_ip_st.cmd_max = nb;
     for (int i = 0; i < nb; i++) if (g_ip_a[i] >= 0) g_ip_st.interp++;
     if (cfg.debug && g_ip_st.ticks >= 150) {
-        logf_("fps: em %ld ticks: %ld vertices, %ld com chave, %ld sem par, %ld com salto, %ld interpolados (%.1f%%), %ld objetos fora; "
-              "cenario pela camera: %ld pontos, %ld nao conferem, %ld ticks sem camera",
-              g_ip_st.ticks, g_ip_st.vtx, g_ip_st.keyed, g_ip_st.nopair, g_ip_st.jump, g_ip_st.interp,
-              g_ip_st.vtx ? 100.0 * g_ip_st.interp / g_ip_st.vtx : 0.0, g_ip_st.bad_objs, g_ip_st.synth, g_ip_st.synth_bad, g_ip_st.cam_off);
-        memset(&g_ip_st, 0, sizeof g_ip_st);
+        logf_("fps: em %ld ticks: %ld vertices, %ld com chave, %ld sem par, %ld invisiveis em A, %ld atras da camera, %ld com salto, %ld interpolados (%.1f%%), %ld objetos fora; comandos por tick: max %ld de %d, %ld ticks cheios",
+              g_ip_st.ticks, g_ip_st.vtx, g_ip_st.keyed, g_ip_st.nopair, g_ip_st.inv, g_ip_st.behind, g_ip_st.jump, g_ip_st.interp,
+              g_ip_st.vtx ? 100.0 * g_ip_st.interp / g_ip_st.vtx : 0.0, g_ip_st.bad_objs, g_ip_st.cmd_max, REC_CAP, g_rec_full);
+        memset(&g_ip_st, 0, sizeof g_ip_st); g_rec_full = 0;
     }
 }
 static void ip_point(int vb, float o[3]) {               // vértice vb de B, interpolado com o par em A
     const GR_CMD *b = &g_show.cmd[vb];
     float fb[3] = { (float)b->d[0], (float)b->d[1], (float)b->d[2] };
-    int j = g_ip_a[vb];
-    ip_vertex(j < g_pt_prev.n ? g_pt_prev.e[j].p : g_syn[j - g_pt_prev.n], fb, g_ip_alpha, o);
+    ip_vertex(g_pt_prev.e[g_ip_a[vb]].p, fb, g_ip_alpha, o);
 }
 static void replay_cmd_ip(const GR_CMD *c, void *ctx) {
     int i = (int)(c - g_show.cmd);
     if (g_ip_tint && c->op == GR_COLOR && g_ip_col[i] >= 0 && g_ip_a[g_ip_col[i]] < 0) {
-        int keyed = g_show.cmd[g_ip_col[i]].u[2] != 0;
-        h_Color4f(keyed ? 1.f : 0.2f, 0.2f, keyed ? 0.2f : 1.f, (GLfloat)c->d[3]);
+        // azul = sem chave; vermelho = sem par; ciano = invisível em A; magenta = atrás da câmera; amarelo = salto;
+        // laranja = objeto fora por causa de outro ponto
+        static const GLfloat tint[6][3] = { { 1, .2f, .2f }, { 1, .2f, .2f }, { .2f, 1, 1 }, { 1, .2f, 1 }, { 1, 1, .2f }, { 1, .55f, .1f } };
+        int v = g_ip_col[i], w = g_ip_why[v] < 6 ? g_ip_why[v] : 0;
+        if (!g_show.cmd[v].u[2]) h_Color4f(.2f, .2f, 1, (GLfloat)c->d[3]);
+        else h_Color4f(tint[w][0], tint[w][1], tint[w][2], (GLfloat)c->d[3]);
         return;
     }
     if (c->op == GR_VERTEX && g_ip_a[i] >= 0) { float o[3]; ip_point(i, o); h_Vertex3fv(o); return; }
@@ -2664,15 +2643,9 @@ static unsigned tag_occ(DWORD p) {
     return 0xffff;                                       // tabela cheia: chave fraca (o par falha e o objeto sai de B)
 }
 static int __cdecl bbfix_room(void *blk) {             // 0x405470(bloco*): o ponto i do bloco vai para a posição usada + i
-    const float *cm = (const float *)0x63c020;
-    if (*(volatile DWORD *)0x4d085c != 0x4095e0) g_cam_rec.ok = 0, g_cam_rec.seen = 1;
-    else if (!g_cam_rec.seen) {
-        memcpy(g_cam_rec.m, cm, sizeof g_cam_rec.m);
-        g_cam_rec.K = *(volatile float *)0x639eb4; g_cam_rec.sent = -*(volatile float *)0x639ebc; g_cam_rec.ok = g_cam_rec.seen = 1;
-    } else if (memcmp(g_cam_rec.m, cm, sizeof g_cam_rec.m)) g_cam_rec.ok = 0;
     if (blk && G_POOL) {
         DWORD first = G_POOL_USED, n = *(volatile DWORD *)((BYTE *)blk + 0x10), oc = tag_occ((DWORD)(ULONG_PTR)blk);
-        for (DWORD i = 0; i < n && i < 0x4000; i++) tag_slot(first + i, (unsigned)(ULONG_PTR)blk, ip_key1(oc, n, i), 1);
+        for (DWORD i = 0; i < n && i < 0x4000; i++) tag_slot(first + i, (unsigned)(ULONG_PTR)blk, ip_key1(oc, n, i));
     }
     return ((int (__cdecl *)(void *))0x405470)(blk);
 }
@@ -2690,7 +2663,7 @@ static void tag_mesh(void *mesh) {
     DWORD base = G_POOL_OBJ, start = G_POOL;
     if (!v || n <= 0 || base < start) return;
     DWORD b = (base - start) >> 4, oc = tag_occ(bbfix_mesh_node);
-    for (int i = 0; i < n && i < 0x4000; i++) tag_slot(b + (*(const WORD *)(v + 8 * i + 6) & 0x7fff), (unsigned)bbfix_mesh_node, ip_key1(oc, (unsigned)n, (unsigned)i), 0);
+    for (int i = 0; i < n && i < 0x4000; i++) tag_slot(b + (*(const WORD *)(v + 8 * i + 6) & 0x7fff), (unsigned)bbfix_mesh_node, ip_key1(oc, (unsigned)n, (unsigned)i));
 }
 int __cdecl bbfix_mesh_a(void *mesh, int a, int b);
 int __cdecl bbfix_mesh_b(void *mesh);
@@ -2701,6 +2674,21 @@ __asm__(".text\n"
         ".globl _bbfix_stub_a_edi\n_bbfix_stub_a_edi:\n\tmovl %edi, _bbfix_mesh_node\n\tmovl %esi, _bbfix_mesh_aux\n\tjmp _bbfix_mesh_a\n"
         ".globl _bbfix_stub_a_esi\n_bbfix_stub_a_esi:\n\tmovl %esi, _bbfix_mesh_node\n\tjmp _bbfix_mesh_a\n"
         ".globl _bbfix_stub_b_esi\n_bbfix_stub_b_esi:\n\tmovl %esi, _bbfix_mesh_node\n\tjmp _bbfix_mesh_b\n");
+// O jogo corta o cenário para a câmera do tick: 0x409950 tira o bloco se os 8 cantos passam do mesmo limite de tela
+// [0x639f18..24] (postos por 0x409760), e os pontos fora dos limites marcam os polígonos. O quadro intermediário vê
+// com a câmera entre A e B: precisa do que B cortou (sumia na borda de trás) e do que A cortou (ficava sem par na
+// borda da frente). Durante a árvore de salas os limites X/Y ficam alargados; o resto do jogo vê os de sempre.
+#define WALK_FX 1.75f
+#define WALK_FY 1.5f
+static int __cdecl bbfix_walk(void *node) {
+    volatile float *lim = (volatile float *)0x639f18;
+    float keep[4] = { lim[0], lim[1], lim[2], lim[3] }, w[4];
+    ip_widen(keep, WALK_FX, WALK_FY, w);
+    for (int i = 0; i < 4; i++) lim[i] = w[i];
+    int r = ((int (__cdecl *)(void *))0x4052b0)(node);
+    for (int i = 0; i < 4; i++) lim[i] = keep[i];
+    return r;
+}
 // troca um "call alvo" (E8) do jogo por "call fn", conferindo o alvo antes
 static int patch_call(DWORD site, DWORD expect, void *fn) {
     BYTE *p = (BYTE *)site;
@@ -2719,6 +2707,10 @@ static void install_tags(void) {
     ok &= patch_call(0x463f62, 0x406df0, (void *)bbfix_stub_b_esi) & patch_call(0x469ad5, 0x406df0, (void *)bbfix_stub_b_esi);
     g_tag_on = ok;
     logf_("fps: chaves do pool %s", ok ? "ligadas (cenario e modelos)" : "DESLIGADAS (chamada inesperada): sem interpolacao");
+    static const DWORD walks[] = { 0x4068a9, 0x406903, 0x406954 };   // caminhadas da árvore de salas
+    int wk = 1;
+    for (size_t i = 0; i < sizeof walks / sizeof *walks; i++) wk &= patch_call(walks[i], 0x4052b0, (void *)bbfix_walk);
+    logf_("fps: corte do cenario alargado (x%.2f, y%.2f) %s", WALK_FX, WALK_FY, wk ? "ligado" : "com falha");
 }
 static void install_pacer(void) {
     if (!g_rec_on) return;

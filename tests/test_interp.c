@@ -64,25 +64,16 @@ static void test_behind(void) {
     CHECK(ip_behind(-1.5f, -1000));     // perto demais do plano da câmera
 }
 
-static void test_room_point(void) {   // 0x408990: vista = linhas m[0..8] · v + m[9..11]; projeção pela vista z
-    float m[12] = { 1, 0, 0,  0, 1, 0,  0, 0, 1,  0, 0, -100 }, o[3];
-    short v[3] = { 10, 20, 0 };
-    CHECK(ip_room_point(m, 500, -0.5f, v, o) && NEAR(o[0], 50) && NEAR(o[1], 100) && NEAR(o[2], -100));   // z < 0: ×K/−z
-    m[11] = 5; short w[3] = { 1, 2, 0 };
-    CHECK(ip_room_point(m, 500, -0.5f, w, o) && NEAR(o[0], 2) && NEAR(o[1], 4) && o[2] == -0.5f);         // z > 0: ×2, sentinela
-    m[11] = 0; short u[3] = { 3, 4, 0 };
-    CHECK(ip_room_point(m, 500, -0.5f, u, o) && NEAR(o[0], 1500) && NEAR(o[1], 2000) && o[2] == 1.0f);    // z = 0: ×K, 1,0
-    float r[12] = { 0, 0, 1,  0, 1, 0,  -1, 0, 0,  0, 0, -50 };   // giro de 90°: x de vista = z, z de vista = −x − 50
-    short s[3] = { 10, 0, 20 };
-    CHECK(ip_room_point(r, 600, -0.5f, s, o) && NEAR(o[0], 200) && NEAR(o[1], 0) && NEAR(o[2], -60));
-    short big[3] = { 32001, 0, 0 }, edge[3] = { 32000, -32000, 0 }, bigy[3] = { 0, -32001, 0 };
-    CHECK(!ip_room_point(m, 500, -0.5f, big, o) && !ip_room_point(m, 500, -0.5f, bigy, o));               // fora de ±32000: invisível
-    CHECK(ip_room_point(m, 500, -0.5f, edge, o));
+static void test_widen(void) {   // limites de tela do jogo { x mín, x máx, y mín, y máx }, alargados em volta do centro
+    float b[4] = { -1280, 1279, -719, 720 }, o[4];
+    ip_widen(b, 2, 1.5f, o);
+    CHECK(NEAR(o[0], -2559.5) && NEAR(o[1], 2558.5) && NEAR(o[2], -1078.75) && NEAR(o[3], 1079.75));
+    ip_widen(b, 1, 1, o);
+    CHECK(o[0] == b[0] && o[1] == b[1] && o[2] == b[2] && o[3] == b[3]);
 }
 
 int main(void) {
-    test_div(); test_vertex_ends(); test_vertex_same_z(); test_vertex_perspective(); test_dist(); test_texcoord(); test_map(); test_keys(); test_behind();
-    test_room_point();
+    test_div(); test_vertex_ends(); test_vertex_same_z(); test_vertex_perspective(); test_dist(); test_texcoord(); test_map(); test_keys(); test_behind(); test_widen();
     printf("%d/%d verificações ok\n", g_run - g_fail, g_run);
     return g_fail != 0;
 }

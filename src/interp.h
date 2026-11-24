@@ -19,10 +19,8 @@ unsigned ip_key_obj(unsigned k1);
 // ponto atrás da câmera (ou colado nela): z > −2, ou os valores que o cenário grava nesse caso (sentinela, 1,0)
 int ip_behind(float z, float sentinel);
 
-// ponto do cenário como 0x408990 grava no pool: v = 3 shorts do bloco, m = matriz da câmera (12 floats, 0x63c020):
-// vista = linhas m[0..2], m[3..5], m[6..8] · v + m[9..11]. Vista z < 0: { X·K/−z, Y·K/−z, z }; z = 0: { X·K, Y·K, 1 };
-// z > 0: { 2X, 2Y, sentinela }. x ou y de v fora de ±32000: 0 (o jogo marca o ponto invisível).
-int ip_room_point(const float m[12], float K, float sentinel, const short v[3], float out[3]);
+// limites de tela { x mín, x máx, y mín, y máx } multiplicados por fx e fy em volta do centro
+void ip_widen(const float b[4], float fx, float fy, float out[4]);
 
 // mapa (k0, k1) -> índice >= 0, endereçamento aberto; cap potência de 2; guarda sempre uma vaga (máx. cap − 1)
 typedef struct { unsigned *key0, *key1; int *val; int cap, n; } IP_MAP;

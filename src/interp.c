@@ -30,16 +30,10 @@ unsigned ip_key1(unsigned oc, unsigned n, unsigned i) { return (oc & 0xF) << 28 
 unsigned ip_key_obj(unsigned k1) { return k1 >> 28; }
 int ip_behind(float z, float sentinel) { return z > -2 || z == sentinel || z == 1.0f; }
 
-int ip_room_point(const float m[12], float K, float sentinel, const short v[3], float out[3]) {
-    double x = v[0], y = v[1], z = v[2];
-    if (x < -32000 || x > 32000 || y < -32000 || y > 32000) return 0;
-    double vz = m[6] * x + m[7] * y + m[8] * z + m[11], f;
-    if (vz < 0) { f = -K / vz; out[2] = (float)vz; }
-    else if (vz == 0) { f = K; out[2] = 1.0f; }
-    else { f = 2; out[2] = sentinel; }
-    out[0] = (float)((m[0] * x + m[1] * y + m[2] * z + m[9]) * f);
-    out[1] = (float)((m[3] * x + m[4] * y + m[5] * z + m[10]) * f);
-    return 1;
+void ip_widen(const float b[4], float fx, float fy, float out[4]) {
+    double cx = (b[0] + (double)b[1]) / 2, hx = (b[1] - (double)b[0]) / 2 * fx;
+    double cy = (b[2] + (double)b[3]) / 2, hy = (b[3] - (double)b[2]) / 2 * fy;
+    out[0] = (float)(cx - hx); out[1] = (float)(cx + hx); out[2] = (float)(cy - hy); out[3] = (float)(cy + hy);
 }
 
 static unsigned ip_hash(unsigned k0, unsigned k1) { return k0 * 2654435761u ^ (k1 + 0x9e3779b9u) * 40503u; }
