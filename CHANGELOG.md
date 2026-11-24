@@ -1,5 +1,11 @@
 # Histórico de versões
 
+## Próxima versão
+- **Andar analógico como no PS1** (`[pad] analog_joystick=1`): inclinar pouco anda devagar, inclinar tudo corre, em qualquer direção. O mod oferece ao jogo um joystick do DirectInput que lê o controle XInput (o Windows 10/11 quase nunca lista um para o controle Xbox) e acerta o limite em que o jogo passa a correr, que era bem menor para a direita e para baixo.
+- **O amigo no analógico direito**, como no PS1 (`[pad] right_stick_partner=1`; a câmera fica no LT/RT).
+- **Brilho por gama** (`[postfx] brightness`, 100 = original): acima de 100 clareia os tons médios sem manchar as cores, abaixo escurece.
+- Tudo desligado por padrão. Contribuição de [LeLordWHO](https://github.com/LeLordWHO) (PR #1), testada com controle Xbox no Windows 11.
+
 ## 0.13
 - **HUD da fase em HD (opcional)**: o mod salva as texturas do HUD em `bin\hd\hud\fonte` e usa a versão 4× de `bin\hd\hud` gerada pelo `tools/hd_menu/make_pack.py`. As silhuetas do Pernalonga e do Taz são retraçadas em curvas (sem serrilhado, mantendo olhos, dedos e pernas); números, espelho, medalhas e setas passam pelo Real-ESRGAN; os degradês das barras são ampliados. Sem o pacote, continua o xBR (`hud_hd`).
 - **Sombra suave** atrás das silhuetas e dos ícones do HUD, para destacá-los do cenário (`[hud] shadow=45`; 0 desliga).

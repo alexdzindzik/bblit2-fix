@@ -54,6 +54,7 @@ Resumo em imagens: [`docs/comparacao_v010.png`](docs/comparacao_v010.png) e [`do
 - **Controle nos menus do início**: a seta do mouse some enquanto você navega pelo controle e volta quando o mouse se mexe.
 - **Menus de opções centralizados**: os menus "nome ... valor" (como Opções > Som) ficam no meio da tela; em português os nomes longos empurravam tudo para a esquerda (`center_menus`).
 - Câmera no analógico direito e em LT/RT, com inversão configurável.
+- **Andar analógico como no PS1** (opcional, `analog_joystick=1`): inclinar pouco anda devagar, inclinar tudo corre, em qualquer direção. O mod oferece ao jogo um joystick do DirectInput que lê o controle XInput, e o código do PS1 que continua no jogo faz o resto. Com `right_stick_partner=1`, o analógico direito move o amigo ao mesmo tempo, como no PS1 (a câmera fica no LT/RT). Contribuição de [LeLordWHO](https://github.com/LeLordWHO).
 
 | Controle | Ação |
 |---|---|
@@ -133,6 +134,9 @@ Para desinstalar, apague `dinput.dll` (e, se quiser, `bblit2fix.ini` e `bblit2fi
 | `invert_camera_stick` | `[pad]` | 1 | Inverte o giro da câmera no analógico direito |
 | `invert_camera_triggers` | `[pad]` | 1 | Inverte o giro da câmera em LT/RT |
 | `deadzone` | `[pad]` | 30 | Zona morta do analógico esquerdo, % |
+| `analog_joystick` | `[pad]` | 0 | Andar analógico como no PS1 (devagar ou correndo pela inclinação) |
+| `right_stick_partner` | `[pad]` | 0 | Com `analog_joystick=1`: analógico direito move o amigo, câmera no LT/RT |
+| `analog_deadzone` / `analog_start` / `analog_outer` / `analog_outer_right` | `[pad]` | 10 / 20 / 95 / 90 | Com `analog_joystick=1`: zona morta, velocidade logo depois dela e inclinação que já conta como o máximo (%) |
 | `language` | `[game]` | -1 | -1 = pelas falas do CD; 0 = inglês … 5 = português |
 | `enabled` | `[postfx]` | 1 | Liga os efeitos de imagem (0 desliga todos) |
 | `bloom` | `[postfx]` | 25 | Brilho suave em volta das partes claras (0–100) |
@@ -141,6 +145,7 @@ Para desinstalar, apague `dinput.dll` (e, se quiser, `bblit2fix.ini` e `bblit2fi
 | `saturation` | `[postfx]` | 110 | Saturação das cores, % |
 | `contrast` | `[postfx]` | 105 | Contraste, % |
 | `vignette` | `[postfx]` | 20 | Cantos levemente escurecidos (0–100) |
+| `brightness` | `[postfx]` | 100 | Brilho por gama, % (50–200): acima de 100 clareia os tons médios sem manchar as cores; abaixo escurece |
 
 **F12** salva uma captura da tela do jogo, na resolução do monitor e sem perdas, em `bin\capturas\`.
 
