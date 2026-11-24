@@ -21,7 +21,7 @@
 #include "menu_center.h"
 #include "stick_shape.h"
 
-#define FIX_VERSION "0.13"
+#define FIX_VERSION "0.13.1"
 
 // ---------------------------------------------------------------- config / log
 static struct {

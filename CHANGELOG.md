@@ -1,6 +1,6 @@
 # Histórico de versões
 
-## Próxima versão
+## 0.13.1
 - **Andar analógico como no PS1** (`[pad] analog_joystick=1`): inclinar pouco anda devagar, inclinar tudo corre, em qualquer direção. O mod oferece ao jogo um joystick do DirectInput que lê o controle XInput (o Windows 10/11 quase nunca lista um para o controle Xbox) e acerta o limite em que o jogo passa a correr, que era bem menor para a direita e para baixo.
 - **O amigo no analógico direito**, como no PS1 (`[pad] right_stick_partner=1`; a câmera fica no LT/RT).
 - **Brilho por gama** (`[postfx] brightness`, 100 = original): acima de 100 clareia os tons médios sem manchar as cores, abaixo escurece.
