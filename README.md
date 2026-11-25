@@ -1,10 +1,22 @@
 # BBLIT2 Fix — Pernalonga e Taz: O Furacão do Tempo
 
-Correções e melhorias para a versão de PC de **Pernalonga e Taz: O Furacão do Tempo** (*Bugs Bunny & Taz: Time Busters*, Infogrames, 2000/2001) rodar bem no Windows 10/11.
+Criei este projeto inicialmente para mim mesmo, por gostar muito de **Pernalonga e Taz: O Furacão do Tempo** (*Bugs Bunny & Taz: Time Busters*, Infogrames, 2000/2001), e decidi disponibilizá-lo para ajudar outras pessoas a rodarem a versão de PC sem problemas no Windows 10 e 11.
 
-É um único `dinput.dll` mais um `bblit2fix.ini`. **Nenhum arquivo do jogo é alterado**: as correções são aplicadas em memória quando o jogo abre. Apague o `dinput.dll` e o jogo volta a ser o original.
+## Como funciona
 
-Inspirado no [BBLIT Remaster](https://github.com/InLineR495/BBLIT-Remaster) (para *Lost in Time*, do mesmo motor), mas é um projeto separado. O executável do *Furacão do Tempo* tem outra estrutura e nenhum endereço em comum com o do *Lost in Time*.
+A solução consiste em apenas dois arquivos: `dinput.dll` e `bblit2fix.ini`. Nenhum arquivo original do jogo é modificado: todas as correções e melhorias são aplicadas diretamente na memória quando o jogo abre. Se quiser voltar ao estado original, basta apagar o `dinput.dll`.
+
+## Instalação rápida
+
+1. Baixe a versão mais recente na aba [Releases](https://github.com/alexdzindzik/bblit2-fix/releases) deste repositório.
+2. Extraia os arquivos `dinput.dll` e `bblit2fix.ini` para a pasta `bin` do jogo, a mesma onde fica o executável (`bblit2.exe`).
+3. Ajuste as opções no `bblit2fix.ini`, se desejar, e inicie o jogo normalmente.
+
+Funciona com a versão brasileira do jogo: veja os [requisitos](#requisitos) e a [instalação detalhada](#instalação).
+
+## Sobre o projeto
+
+Embora tenha sido inspirado no [BBLIT Remaster](https://github.com/InLineR495/BBLIT-Remaster) (feito para *Lost in Time*, do mesmo motor), este é um projeto totalmente separado. O executável de *O Furacão do Tempo* tem outra estrutura e nenhum endereço em comum com o de *Lost in Time*.
 
 ## Vídeo
 
