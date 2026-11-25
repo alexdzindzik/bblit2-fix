@@ -44,7 +44,15 @@ static void test_late(void) {
     CHECK(pacer_next(g0, p, g0, g0 + TPF + 5, g0 + TPF, M) == -1);   // já passou do fim do tick
 }
 
+static void test_fps(void) {   // 30 = desligado; 0 = taxa do monitor (60..240); 31..360 = o valor; o resto = 30
+    CHECK(pacer_fps(30, 144) == 30); CHECK(pacer_fps(0, 144) == 144); CHECK(pacer_fps(0, 60) == 60);
+    CHECK(pacer_fps(0, 0) == 60); CHECK(pacer_fps(0, 1) == 60); CHECK(pacer_fps(0, 50) == 60); CHECK(pacer_fps(0, 360) == 240);
+    CHECK(pacer_fps(144, 60) == 144); CHECK(pacer_fps(75, 75) == 75); CHECK(pacer_fps(360, 60) == 360);
+    CHECK(pacer_fps(-5, 144) == 30); CHECK(pacer_fps(10, 144) == 30); CHECK(pacer_fps(500, 144) == 30);
+}
+
 int main(void) {
+    test_fps();
     test_period();
     test_60_one_extra();
     test_120_three_extra();

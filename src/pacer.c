@@ -16,3 +16,9 @@ long long pacer_next(long long g0, long long period, long long start, long long 
     long long t = g0 + ceil_div(lo - g0, period) * period;
     return t < hi ? t : -1;
 }
+
+int pacer_fps(int cfg_fps, int monitor_hz) {
+    if (cfg_fps == 0) return monitor_hz < 60 ? 60 : monitor_hz > 240 ? 240 : monitor_hz;
+    if (cfg_fps > 30 && cfg_fps <= 360) return cfg_fps;
+    return 30;
+}

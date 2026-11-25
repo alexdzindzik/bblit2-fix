@@ -10,4 +10,8 @@ long long pacer_period(long long freq, int fps);
 // Devolve −1 se não houver.
 long long pacer_next(long long g0, long long period, long long start, long long after, long long end, long long margin);
 
+// fps do ini -> fps usado: 30 = desligado (o jogo original); 0 = taxa do monitor, entre 60 e 240 (monitor que
+// informa 0 ou 1 Hz, o padrão do driver, conta como 60); 31 a 360 = o próprio valor; qualquer outro = 30.
+int pacer_fps(int cfg_fps, int monitor_hz);
+
 #endif

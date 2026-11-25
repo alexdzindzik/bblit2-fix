@@ -1,5 +1,11 @@
 # Histórico de versões
 
+## 0.14
+- **Movimento suave a 60, 120, 144 fps ou na taxa do monitor** (`[video] fps`, padrão 0 = taxa do monitor, de 60 a 240; 31 a 360 = valor fixo; 30 = original). A lógica do jogo continua a 30 por segundo; o mod grava o desenho de cada tick e mostra quadros intermediários com cenário, câmera, personagens, objetos, sombras e efeitos 2D em posições interpoladas. A imagem fica 1 tick (~33 ms) atrás do jogo, como no [BBLIT Remaster](https://github.com/InLineR495/BBLIT-Remaster), de onde vêm a ideia e a regra de salto (`fps_jump`). Cortes de câmera, teletransportes e a tela dividida não são interpolados.
+- **Correção**: com o "Brilho" do menu Vídeo acima do meio, cores claras das texturas "davam a volta" e viravam manchas escuras; agora ficam no máximo.
+- **Diagnóstico** (`debug=1`): F2 pinta o que não está sendo interpolado, F3 volta aos 30 do jogo para comparar, F5 grava uma medição do desenho.
+- **Problemas conhecidos**: ao girar a câmera rápido, um objeto que entra pela borda pode dar um pulinho de 1 tick; no rosto da Vovó e do Piu-Piu, a peça dos olhos sai mais clara que a cabeça (do próprio jogo).
+
 ## 0.13.1
 - **Andar analógico como no PS1** (`[pad] analog_joystick=1`): inclinar pouco anda devagar, inclinar tudo corre, em qualquer direção. O mod oferece ao jogo um joystick do DirectInput que lê o controle XInput (o Windows 10/11 quase nunca lista um para o controle Xbox) e acerta o limite em que o jogo passa a correr, que era bem menor para a direita e para baixo.
 - **O amigo no analógico direito**, como no PS1 (`[pad] right_stick_partner=1`; a câmera fica no LT/RT).

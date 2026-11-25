@@ -25,12 +25,12 @@
 #include "interp.h"
 #include "coloradj.h"
 
-#define FIX_VERSION "0.13.1"
+#define FIX_VERSION "0.14"
 
 // ---------------------------------------------------------------- config / log
 static struct {
     int enabled, log_gl, aspect, msaa, vsync, xinput, unlock_joy, a_enter, deadzone, cam_stick, swap_ab, language, game_res, background, debug, inv_stick, inv_trig, draw_dist, ssaa, mipmaps, aniso, actor_dist, auto_quality, lod_dist, force_gl, dump_tex, hd_tex, pad_prompts, menu_fill, hires_menu, menu_pad, menu_hd, hud_probe, center_menus, hud_hd, hud_shadow, fps, fps_jump;
-} cfg = { 1, 1, 2, 4, 1, 1, 0, 1, 30, 1, 0, -1, 1, 1, 0, 1, 1, 400, 2, 1, 16, 200, 1, 400, 1, 0, 1, 2, 1, 1, 1, 1, 0, 1, 1, 45, 30, 500 };
+} cfg = { 1, 1, 2, 4, 1, 1, 0, 1, 30, 1, 0, -1, 1, 1, 0, 1, 1, 400, 2, 1, 16, 200, 1, 400, 1, 0, 1, 2, 1, 1, 1, 1, 0, 1, 1, 45, 0, 500 };
 // joystick analógico [pad]: o controle XInput oferecido ao jogo como joystick do DirectInput (live = o jogo abriu)
 static struct { int on, partner, dead, start, outer, outer_r, live; } aj = { 0, 0, 10, 20, 95, 90, 0 };
 // analógico direito no pacote do PS1 (bytes 4/5), escrito por xj_GetDeviceState e lido pelo bbfix_rs_stub
@@ -63,7 +63,7 @@ static void load_config(void) {
     cfg.aspect    = ini_int("video", "aspect", 2);
     cfg.msaa      = ini_int("video", "msaa", 4);
     cfg.vsync     = ini_int("video", "vsync", 1);
-    cfg.fps       = ini_int("video", "fps", 30);
+    cfg.fps       = ini_int("video", "fps", 0);
     cfg.fps_jump  = ini_int("video", "fps_jump", 500);
     cfg.xinput    = ini_int("pad", "xinput", 1);
     cfg.unlock_joy= ini_int("pad", "unlock_dinput_joystick", 0);
@@ -367,9 +367,13 @@ static void rec_invalidate(void) { g_rec_bad = 1; g_rec_ok = 0; g_pair_ok = 0; }
 static int pair_alloc(void);
 static void pair_prepare(void);
 static void rec_init(void) {
+    int hz = 0;
     { DEVMODEA dm; memset(&dm, 0, sizeof dm); dm.dmSize = sizeof dm;
-      if (EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &dm)) logf_("monitor: %lux%lu a %lu Hz", dm.dmPelsWidth, dm.dmPelsHeight, dm.dmDisplayFrequency); }
-    if (cfg.fps != 30 && cfg.fps != 60 && cfg.fps != 120 && cfg.fps != 144) { logf_("fps=%d nao suportado: usando 30", cfg.fps); cfg.fps = 30; }
+      if (EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &dm)) { hz = (int)dm.dmDisplayFrequency; logf_("monitor: %lux%lu a %lu Hz", dm.dmPelsWidth, dm.dmPelsHeight, dm.dmDisplayFrequency); } }
+    int want = cfg.fps;
+    cfg.fps = pacer_fps(want, hz);
+    if (want == 0) logf_("fps=0: taxa do monitor, %d quadros por segundo", cfg.fps);
+    else if (cfg.fps == 30 && want != 30) logf_("fps=%d nao suportado (0, 30 ou de 31 a 360): usando 30", want);
     if (cfg.fps <= 30) return;
     GR_CMD *b = malloc(sizeof(GR_CMD) * REC_CAP * 3);
     if (!b || !pair_alloc()) { logf_("fps=%d: sem memoria para o instantaneo, usando 30", cfg.fps); cfg.fps = 30; return; }
@@ -2603,7 +2607,13 @@ static void present_extra(void) {
     clear_bars();
     g_frames++;
 }
-static int ip_active(void) { return g_rec_on && g_tag_on && !g_extra_off && g_pair_ok && g_swap_dc && !(g_hwnd && IsIconic(g_hwnd)); }
+static int split_screen(void) {                      // tela dividida: o jogo desenha cada jogador com a própria câmera
+    int on = *(volatile BYTE *)0x4d2bd4 > 1;           // jogadores desenhados por quadro (0x40144b)
+    static int last = -1;
+    if (on != last) { if (last >= 0 || on) logf_("fps: tela dividida %s", on ? "ligada: quadros extras sem interpolar" : "desligada: interpolacao de volta"); last = on; }
+    return on;
+}
+static int ip_active(void) { return g_rec_on && g_tag_on && !g_extra_off && g_pair_ok && g_swap_dc && !(g_hwnd && IsIconic(g_hwnd)) && !split_screen(); }
 static double ip_alpha_now(void) {                     // posição entre A e B, pelo tempo desde o fim de B
     LARGE_INTEGER now; QueryPerformanceCounter(&now);
     double span = (double)(g_show_t - g_prev_t);
