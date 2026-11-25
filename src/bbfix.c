@@ -23,6 +23,7 @@
 #include "glrec.h"
 #include "pacer.h"
 #include "interp.h"
+#include "coloradj.h"
 
 #define FIX_VERSION "0.13.1"
 
@@ -377,6 +378,7 @@ static void rec_init(void) {
 }
 // começo do instantâneo (fim do after_swap): estado inicial lido do OpenGL, para a repetição começar igual
 static void tag_new_frame(void);
+static void prims_refresh(void);
 static void rec_start(void) {
     if (!g_rec_on) return;
     gr_reset(&g_rec); g_rec_draws = 0;
@@ -391,6 +393,7 @@ static void rec_start(void) {
     glGetIntegerv(GL_VIEWPORT, v); for (int i = 0; i < 4; i++) d[i] = v[i]; rec(GR_VIEWPORT | GR_RAW, 0, 0, 0, d, 4);
     glGetIntegerv(GL_SCISSOR_BOX, v); for (int i = 0; i < 4; i++) d[i] = v[i]; rec(GR_SCISSOR | GR_RAW, 0, 0, 0, d, 4);
     glGetIntegerv(GL_MATRIX_MODE, &w); rec(GR_MATRIXMODE, (unsigned)w, 0, 0, NULL, 0);
+    prims_refresh();
 }
 // fim do instantâneo (troca do jogo): A <- B <- gravado e casamento do par; o próximo começa no fim do after_swap
 static long g_rec_full;                                   // debug: ticks que não couberam no instantâneo
@@ -2493,7 +2496,7 @@ static int g_ip_tint;          // debug F2: pinta o que não é interpolado (cor
 static int *g_ip_col;          // por comando de B: GR_COLOR -> vértice seguinte (para a pintura do F2)
 static unsigned char *g_ip_why;   // debug F2: por que o vértice de B não foi interpolado (IP_W_*), para a cor da pintura
 enum { IP_W_OK, IP_W_NOPAIR, IP_W_INV, IP_W_BEHIND, IP_W_JUMP, IP_W_OBJ };
-static struct { long ticks, vtx, keyed, nopair, inv, behind, jump, interp, bad_objs, cmd_max; } g_ip_st;   // debug: contagens a cada ~5 s
+static struct { long ticks, vtx, keyed, nopair, inv, behind, jump, interp, bad_objs, cmd_max, spr, spr_interp; } g_ip_st;   // debug: contagens a cada ~5 s
 static int pair_alloc(void) {
     g_ip_a = malloc(sizeof(int) * REC_CAP); g_ip_tc = malloc(sizeof(int) * REC_CAP); g_ip_col = malloc(sizeof(int) * REC_CAP);
     g_ip_why = malloc(REC_CAP); if (!g_ip_why) return 0;
@@ -2519,20 +2522,24 @@ static void pair_prepare(void) {
         if (B[i].op == GR_VERTEX) g_ip_st.vtx++;
         if (B[i].op != GR_VERTEX || !B[i].u[2]) continue;
         g_ip_st.keyed++;
-        unsigned obj = ip_key_obj(B[i].u[2] - 1);         // ocorrência do bloco/malha no quadro
+        unsigned bg0, bg1; ip_bad_group(B[i].u[1], B[i].u[2] - 1, &bg0, &bg1);   // objeto (ou local de sprite) do ponto
         int j = ip_map_get(&g_map_a, B[i].u[1], B[i].u[2]);
         if (j < 0 || A[j].inv) {
             if (j < 0) g_ip_st.nopair++; else g_ip_st.inv++;
-            g_ip_why[i] = j < 0 ? IP_W_NOPAIR : IP_W_INV; ip_map_put(&g_map_bad, B[i].u[1], obj, 1); continue;
+            g_ip_why[i] = j < 0 ? IP_W_NOPAIR : IP_W_INV; ip_map_put(&g_map_bad, bg0, bg1, 1); continue;
         }
         const float *a = A[j].p; float b[3] = { (float)B[i].d[0], (float)B[i].d[1], (float)B[i].d[2] };
-        if (ip_behind(a[2], sent) || ip_behind(b[2], sent)) { g_ip_st.behind++; g_ip_why[i] = IP_W_BEHIND; continue; }   // atrás da câmera: sai como em B
-        if (ip_dist(a, b) / K > 0.5 * fabs(b[2]) + cfg.fps_jump) { g_ip_st.jump++; g_ip_why[i] = IP_W_JUMP; ip_map_put(&g_map_bad, B[i].u[1], obj, 1); continue; }
+        int spr = (B[i].u[1] & IP_K0_SPRITE) != 0;        // sprite: z de tela (0), interpola reto, sem "atrás da câmera"
+        if (!spr && (ip_behind(a[2], sent) || ip_behind(b[2], sent))) { g_ip_st.behind++; g_ip_why[i] = IP_W_BEHIND; continue; }   // atrás da câmera: sai como em B
+        if (ip_jump(a, b, K, cfg.fps_jump, spr)) { g_ip_st.jump++; g_ip_why[i] = IP_W_JUMP; ip_map_put(&g_map_bad, bg0, bg1, 1); continue; }
         g_ip_a[i] = j;
     }
     if (g_map_bad.n)
         for (int i = 0; i < nb; i++)
-            if (g_ip_a[i] >= 0 && ip_map_get(&g_map_bad, B[i].u[1], ip_key_obj(B[i].u[2] - 1)) >= 0) { g_ip_a[i] = -1; g_ip_why[i] = IP_W_OBJ; }
+            if (g_ip_a[i] >= 0) {
+                unsigned bg0, bg1; ip_bad_group(B[i].u[1], B[i].u[2] - 1, &bg0, &bg1);
+                if (ip_map_get(&g_map_bad, bg0, bg1) >= 0) { g_ip_a[i] = -1; g_ip_why[i] = IP_W_OBJ; }
+            }
     for (int i = nb - 1, next = -1; i >= 0; i--) {        // TEXCOORD/COLOR -> vértice seguinte do mesmo glBegin
         unsigned op = B[i].op;
         if (op == GR_VERTEX) next = i;
@@ -2542,11 +2549,15 @@ static void pair_prepare(void) {
     }
     g_ip_st.bad_objs += g_map_bad.n; g_ip_st.ticks++;
     if (nb > g_ip_st.cmd_max) g_ip_st.cmd_max = nb;
-    for (int i = 0; i < nb; i++) if (g_ip_a[i] >= 0) g_ip_st.interp++;
+    for (int i = 0; i < nb; i++) {
+        int spr = B[i].op == GR_VERTEX && B[i].u[2] && (B[i].u[1] & IP_K0_SPRITE);
+        g_ip_st.spr += spr;
+        if (g_ip_a[i] >= 0) { g_ip_st.interp++; g_ip_st.spr_interp += spr; }
+    }
     if (cfg.debug && g_ip_st.ticks >= 150) {
-        logf_("fps: em %ld ticks: %ld vertices, %ld com chave, %ld sem par, %ld invisiveis em A, %ld atras da camera, %ld com salto, %ld interpolados (%.1f%%), %ld objetos fora; comandos por tick: max %ld de %d, %ld ticks cheios",
+        logf_("fps: em %ld ticks: %ld vertices, %ld com chave, %ld sem par, %ld invisiveis em A, %ld atras da camera, %ld com salto, %ld interpolados (%.1f%%), %ld objetos fora; sprites: %ld com chave, %ld interpolados; comandos por tick: max %ld de %d, %ld ticks cheios",
               g_ip_st.ticks, g_ip_st.vtx, g_ip_st.keyed, g_ip_st.nopair, g_ip_st.inv, g_ip_st.behind, g_ip_st.jump, g_ip_st.interp,
-              g_ip_st.vtx ? 100.0 * g_ip_st.interp / g_ip_st.vtx : 0.0, g_ip_st.bad_objs, g_ip_st.cmd_max, REC_CAP, g_rec_full);
+              g_ip_st.vtx ? 100.0 * g_ip_st.interp / g_ip_st.vtx : 0.0, g_ip_st.bad_objs, g_ip_st.spr, g_ip_st.spr_interp, g_ip_st.cmd_max, REC_CAP, g_rec_full);
         memset(&g_ip_st, 0, sizeof g_ip_st); g_rec_full = 0;
     }
 }
@@ -2697,6 +2708,50 @@ static int patch_call(DWORD site, DWORD expect, void *fn) {
     VirtualProtect(p + 1, 4, PAGE_EXECUTE_READWRITE, &old); memcpy(p + 1, &rel, 4); VirtualProtect(p + 1, 4, old, &old);
     FlushInstructionCache(GetCurrentProcess(), p, 5);
     return 1;
+}
+// Sprites, sombras, brilhos, partículas e efeitos de tela: o renderizador OpenGL guarda as primitivas 2D em ponteiros
+// globais (0x425635..0x42568f, 0x41ee1c), e 0x4281a3 chama 0x427be0 direto. Cada uma pega posições do pool somando em
+// [0x4d084c]. O invólucro anota o contador antes e depois e marca as posições novas com a chave (local da chamada com
+// IP_K0_SPRITE, ocorrência desse local no quadro, n, i). Todas são cdecl, com no máximo 3 argumentos na pilha.
+static const struct { DWORD slot, fn; } g_prims[] = {
+    { 0x63c3e4, 0x41c5b0 }, { 0x63c3e8, 0x41ca80 }, { 0x63c3ec, 0x41c820 }, { 0x63c3f0, 0x41cf40 },
+    { 0x4d0738, 0x41d2f0 }, { 0x4d073c, 0x41d540 }, { 0x4d0740, 0x41d720 }, { 0x4d0780, 0x41d920 },
+    { 0x63c098, 0x420450 }, { 0, 0x427be0 } };   // o último é a chamada direta de 0x4281a3
+#define PRIM_N ((int)(sizeof g_prims / sizeof *g_prims))
+static void tag_sprite(DWORD site, DWORD before, DWORD after) {
+    if (!g_tag_on || after <= before || after - before > 0x3FFF) return;
+    DWORD n = after - before, oc = tag_occ(site);
+    for (DWORD i = 0; i < n; i++) { unsigned k0, k1; ip_sprite_key(site, oc, n, i, &k0, &k1); tag_slot(before + i, k0, k1); }
+}
+void __cdecl bbfix_tag_sprite_now(DWORD site, DWORD before) { tag_sprite(site, before, G_POOL_USED); }
+// Invólucro em assembly: guarda o contador, copia os 4 argumentos para a própria pilha (só lê os do jogo: em C o
+// compilador pode reescrever as posições dos argumentos, que para quem passa 2 ou 3 são variáveis do jogo), chama a
+// primitiva, marca as posições novas com o endereço de retorno como local da chamada e devolve eax da primitiva.
+#define PRIM_STUB(k, fn) ".globl _bbfix_prim_" #k "\n_bbfix_prim_" #k ":\n" \
+    "\tpushl 0x4d084c\n\tpushl 20(%esp)\n\tpushl 20(%esp)\n\tpushl 20(%esp)\n\tpushl 20(%esp)\n" \
+    "\tmovl $" #fn ", %eax\n\tcall *%eax\n\taddl $16, %esp\n" \
+    "\tpushl %eax\n\tpushl 4(%esp)\n\tpushl 12(%esp)\n\tcall _bbfix_tag_sprite_now\n\taddl $8, %esp\n" \
+    "\tpopl %eax\n\taddl $4, %esp\n\tret\n"
+__asm__(".text\n" PRIM_STUB(0, 0x41c5b0) PRIM_STUB(1, 0x41ca80) PRIM_STUB(2, 0x41c820) PRIM_STUB(3, 0x41cf40)
+        PRIM_STUB(4, 0x41d2f0) PRIM_STUB(5, 0x41d540) PRIM_STUB(6, 0x41d720) PRIM_STUB(7, 0x41d920)
+        PRIM_STUB(8, 0x420450) PRIM_STUB(9, 0x427be0));
+void bbfix_prim_0(void), bbfix_prim_1(void), bbfix_prim_2(void), bbfix_prim_3(void), bbfix_prim_4(void),
+     bbfix_prim_5(void), bbfix_prim_6(void), bbfix_prim_7(void), bbfix_prim_8(void), bbfix_prim_9(void);
+static void (*const g_prim_wrap[])(void) = { bbfix_prim_0, bbfix_prim_1, bbfix_prim_2, bbfix_prim_3, bbfix_prim_4,
+                                             bbfix_prim_5, bbfix_prim_6, bbfix_prim_7, bbfix_prim_8, bbfix_prim_9 };
+// põe os invólucros nos ponteiros que estão com a primitiva original (o renderizador pode refazê-los, por exemplo ao
+// trocar de modo); ponteiro com outro valor fica como está
+static void prims_refresh(void) {
+    static int last = -1, direct = -1;
+    if (!g_tag_on) return;
+    if (direct < 0) direct = patch_call(0x4281a3, 0x427be0, (void *)g_prim_wrap[PRIM_N - 1]);
+    int n = 0;
+    for (int k = 0; k < PRIM_N - 1; k++) {
+        volatile DWORD *g = (volatile DWORD *)g_prims[k].slot;
+        if (*g == g_prims[k].fn) *g = (DWORD)g_prim_wrap[k];
+        n += *g == (DWORD)g_prim_wrap[k];
+    }
+    if (n != last) { last = n; logf_("fps: sprites com chave (%d de %d ponteiros, chamada direta %s)", n, PRIM_N - 1, direct ? "ok" : "falhou"); }
 }
 static void install_tags(void) {
     if (!g_rec_on) return;
@@ -4338,6 +4393,12 @@ static void __cdecl h_AdjPal(BYTE *pal) {
     if (orig) memcpy(orig, e, (size_t)n * 4);
     r_AdjPal(pal);
     if (!orig) return;
+    // canal que passou de 255 na conta do jogo e "deu a volta" vira 255 (ver ca_fix_wrap): era a pele manchada da
+    // Vovó e do Piu-Piu com o Brilho alto
+    double hue = *(volatile double *)0x63a050, sat = *(volatile double *)0x63a058, val = *(volatile double *)0x63a060;
+    int wraps = 0;
+    for (int i = 0; i < n; i++) wraps += ca_fix_wrap((const unsigned char *)&orig[i], (unsigned char *)&e[i], hue, sat, val);
+    static int nw; if (wraps && nw++ < 10) logf_("paleta de %d cores: %d canais estourados pelo ajuste de cor do jogo, corrigidos (matiz %.0f, saturacao %.2f, brilho %.2f)", n, wraps, hue, sat, val);
     int fixed = 0;
     for (int i = 1; i < n; i++) {
         int same = -1;

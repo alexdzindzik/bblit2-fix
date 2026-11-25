@@ -64,6 +64,37 @@ static void test_behind(void) {
     CHECK(ip_behind(-1.5f, -1000));     // perto demais do plano da câmera
 }
 
+static void test_jump(void) {   // K = 1000 e z = -1000: deslocamento s na tela = s na vista; jump = 500
+    float b[3] = { 0, 0, -1000 }, a[3] = { 0, 0, -1000 };
+    CHECK(!ip_jump(a, b, 1000, 500, 0) && !ip_jump(a, b, 1000, 500, 1));
+    a[0] = 900; CHECK(!ip_jump(a, b, 1000, 500, 0) && ip_jump(a, b, 1000, 500, 1));   // limites 1000 e 250
+    a[0] = 200; CHECK(!ip_jump(a, b, 1000, 500, 0) && !ip_jump(a, b, 1000, 500, 1));
+    a[0] = 1100; CHECK(ip_jump(a, b, 1000, 500, 0) && ip_jump(a, b, 1000, 500, 1));
+    float s0[3] = { 0, 0, 0 }, s1[3] = { 200, 0, 0 }, s2[3] = { 300, 0, 0 };      // sprite 2D (z = 0): distância na tela
+    CHECK(!ip_jump(s0, s1, 1000, 500, 1) && ip_jump(s0, s2, 1000, 500, 1));      // limite jump / 2 = 250
+}
+static void test_sprite_key(void) {   // ocorrências 0..4095 do mesmo local dão chaves diferentes; bit de sprite em k0
+    unsigned a0, a1, b0, b1, c0, c1;
+    ip_sprite_key(0x464bb4, 0, 4, 2, &a0, &a1);
+    ip_sprite_key(0x464bb4, 16, 4, 2, &b0, &b1);
+    ip_sprite_key(0x464bb4, 4095, 4, 2, &c0, &c1);
+    CHECK((a0 & IP_K0_SPRITE) && (b0 & IP_K0_SPRITE) && (c0 & IP_K0_SPRITE));
+    CHECK(!(a0 == b0 && a1 == b1) && !(a0 == c0 && a1 == c1) && !(b0 == c0 && b1 == c1));
+    unsigned d0, d1; ip_sprite_key(0x4532bc, 0, 4, 2, &d0, &d1);            // outro local, mesma ocorrência
+    CHECK(!(a0 == d0 && a1 == d1));
+    CHECK(ip_key_obj(a1) == 0 && ip_key_obj(b1) == 0 && (a1 & 0x3FFF) == 2);  // o objeto (k0, ocorrência & 15) separa 0 de 16 por k0
+}
+static void test_bad_group(void) {   // sprites: o local inteiro; cenário e malhas: (k0, ocorrência & 15)
+    unsigned a0, a1, b0, b1, c0, c1, g0, g1, h0, h1, j0, j1;
+    ip_sprite_key(0x4014b4, 3, 4, 1, &a0, &a1);
+    ip_sprite_key(0x4014b4, 40, 4, 2, &b0, &b1);
+    ip_sprite_key(0x464c67, 3, 4, 1, &c0, &c1);
+    ip_bad_group(a0, a1, &g0, &g1); ip_bad_group(b0, b1, &h0, &h1); ip_bad_group(c0, c1, &j0, &j1);
+    CHECK(g0 == h0 && g1 == h1);                                        // mesmo local, ocorrências diferentes
+    CHECK(!(g0 == j0 && g1 == j1));                                     // outro local
+    unsigned m1 = ip_key1(5, 30, 7);
+    ip_bad_group(0x05123450, m1, &g0, &g1); CHECK(g0 == 0x05123450 && g1 == 5);   // malha: como antes
+}
 static void test_widen(void) {   // limites de tela do jogo { x mín, x máx, y mín, y máx }, alargados em volta do centro
     float b[4] = { -1280, 1279, -719, 720 }, o[4];
     ip_widen(b, 2, 1.5f, o);
@@ -73,7 +104,7 @@ static void test_widen(void) {   // limites de tela do jogo { x mín, x máx, y 
 }
 
 int main(void) {
-    test_div(); test_vertex_ends(); test_vertex_same_z(); test_vertex_perspective(); test_dist(); test_texcoord(); test_map(); test_keys(); test_behind(); test_widen();
+    test_div(); test_vertex_ends(); test_vertex_same_z(); test_vertex_perspective(); test_dist(); test_texcoord(); test_map(); test_keys(); test_behind(); test_widen(); test_jump(); test_sprite_key(); test_bad_group();
     printf("%d/%d verificações ok\n", g_run - g_fail, g_run);
     return g_fail != 0;
 }

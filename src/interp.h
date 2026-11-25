@@ -19,6 +19,20 @@ unsigned ip_key_obj(unsigned k1);
 // ponto atrás da câmera (ou colado nela): z > −2, ou os valores que o cenário grava nesse caso (sentinela, 1,0)
 int ip_behind(float z, float sentinel);
 
+// salto entre A e B (corte de câmera, teletransporte, par trocado): distância de vista / K maior que o limite.
+// Normal: 0,5·|z de B| + jump. Sprite (chave com IP_K0_SPRITE): 0,15·|z de B| + jump/5, mais apertado porque a
+// ocorrência de um sprite pode trocar de dono quando um objeto entra ou sai da tela.
+// Sprite 2D (|z| < 2 nos dois ticks, z de tela): distância na tela > jump/2.
+#define IP_K0_SPRITE 0x80000000u
+int ip_jump(const float a[3], const float b[3], double K, double jump, int sprite);
+// chave de sprite: k0 = IP_K0_SPRITE | (ocorrência >> 4, 8 bits) << 23 | local da chamada (código do jogo < 0x800000);
+// k1 = ip_key1(ocorrência, n, i). Cabem 4096 ocorrências por local (ip_key1 sozinho guarda só 16).
+void ip_sprite_key(unsigned site, unsigned oc, unsigned n, unsigned i, unsigned *k0, unsigned *k1);
+// grupo que sai inteiro como em B quando um ponto falha (sem par ou salto): (k0, ocorrência & 15) para cenário e
+// malhas; para sprites, o local da chamada inteiro, para peças vizinhas do mesmo desenho (as faixas do céu, por
+// exemplo) não ficarem metade interpoladas e metade como em B, com um vão entre elas
+void ip_bad_group(unsigned k0, unsigned k1, unsigned *g0, unsigned *g1);
+
 // limites de tela { x mín, x máx, y mín, y máx } multiplicados por fx e fy em volta do centro
 void ip_widen(const float b[4], float fx, float fy, float out[4]);
 

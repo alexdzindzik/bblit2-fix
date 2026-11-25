@@ -19,6 +19,24 @@ double ip_dist(const float a[3], const float b[3]) {
     return sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+int ip_jump(const float a[3], const float b[3], double K, double jump, int sprite) {
+    if (sprite && fabs(a[2]) < 2 && fabs(b[2]) < 2)    // sprite 2D (z de tela): distância em pixels
+        return hypot((double)b[0] - a[0], (double)b[1] - a[1]) > jump / 2;
+    double z = fabs(b[2]);
+    double lim = sprite ? 0.15 * z + jump / 5 : 0.5 * z + jump;
+    return ip_dist(a, b) / K > lim;
+}
+
+void ip_sprite_key(unsigned site, unsigned oc, unsigned n, unsigned i, unsigned *k0, unsigned *k1) {
+    *k0 = IP_K0_SPRITE | ((oc >> 4) & 0xFF) << 23 | (site & 0x7FFFFF);
+    *k1 = ip_key1(oc, n, i);
+}
+
+void ip_bad_group(unsigned k0, unsigned k1, unsigned *g0, unsigned *g1) {
+    if (k0 & IP_K0_SPRITE) { *g0 = IP_K0_SPRITE | (k0 & 0x7FFFFF); *g1 = 0x10; }
+    else { *g0 = k0; *g1 = ip_key_obj(k1); }
+}
+
 void ip_texcoord(const double tc[4], double z, double out[4]) {
     out[0] = tc[0]; out[1] = tc[1]; out[2] = tc[2]; out[3] = tc[3];
     if (tc[3] == 0 || z == 0) return;
