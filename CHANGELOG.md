@@ -1,5 +1,8 @@
 # Histórico de versões
 
+## Próxima versão
+- **Correção**: no rosto da Vovó e do Piu-Piu, a peça dos olhos saía mais clara que a cabeça. O "Brilho" (e a saturação e a matiz) do menu Vídeo só era aplicado às paletas das texturas, e a peça dos olhos traz a cor da pele na textura, enquanto a cabeça é desenhada com uma textura toda branca e recebe a cor da pele por vértice (o Pernalonga também). Agora as partes com a cor só no vértice (sem textura ou com textura toda branca) recebem o mesmo ajuste, no mesmo modelo HSI do jogo (`[video] color_untextured`, padrão 1; 0 = como o original). Com o Brilho no padrão (1,125), essas partes ficam 12,5% mais claras, como as texturas já ficavam.
+
 ## 0.14
 - **Movimento suave a 60, 120, 144 fps ou na taxa do monitor** (`[video] fps`, padrão 0 = taxa do monitor, de 60 a 240; 31 a 360 = valor fixo; 30 = original). A lógica do jogo continua a 30 por segundo; o mod grava o desenho de cada tick e mostra quadros intermediários com cenário, câmera, personagens, objetos, sombras e efeitos 2D em posições interpoladas. A imagem fica 1 tick (~33 ms) atrás do jogo, como no [BBLIT Remaster](https://github.com/InLineR495/BBLIT-Remaster), de onde vêm a ideia e a regra de salto (`fps_jump`). Cortes de câmera, teletransportes e a tela dividida não são interpolados.
 - **Correção**: com o "Brilho" do menu Vídeo acima do meio, cores claras das texturas "davam a volta" e viravam manchas escuras; agora ficam no máximo.

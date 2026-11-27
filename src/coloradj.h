@@ -15,4 +15,8 @@ void ca_hsi2rgb(double h, double s, double i, double *r, double *g, double *b);
 // orig: cor da paleta antes do ajuste; game: o que o jogo gravou (corrigido no lugar). Devolve os canais trocados.
 int ca_fix_wrap(const unsigned char orig[3], unsigned char game[3], double hue, double sat, double val);
 
+// O mesmo ajuste numa cor por vértice (partes sem textura): H + matiz, S · saturação e I · brilho (no máximo 1),
+// canais limitados a 0..1. Matiz 0, saturação 1 e brilho 1 devolvem a cor exatamente igual.
+void ca_adjust(const float in[3], float out[3], double hue, double sat, double val);
+
 #endif

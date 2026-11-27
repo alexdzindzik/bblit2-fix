@@ -44,3 +44,17 @@ int ca_fix_wrap(const unsigned char orig[3], unsigned char game[3], double hue, 
     }
     return n;
 }
+
+void ca_adjust(const float in[3], float out[3], double hue, double sat, double val) {
+    if (hue == 0 && sat == 1 && val == 1) { out[0] = in[0]; out[1] = in[1]; out[2] = in[2]; return; }
+    double h, s, i, c[3];
+    ca_rgb2hsi(in[0], in[1], in[2], &h, &s, &i);
+    h += hue;
+    if (h > 360) h -= 360;
+    s *= sat;
+    if (s > 1) s = 1;
+    i *= val;
+    if (i > 1) i = 1;
+    ca_hsi2rgb(h, s, i, &c[0], &c[1], &c[2]);
+    for (int k = 0; k < 3; k++) out[k] = (float)(c[k] < 0 ? 0 : c[k] > 1 ? 1 : c[k]);
+}
