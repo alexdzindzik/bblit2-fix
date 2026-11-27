@@ -31,9 +31,30 @@ static void test_fix_wrap(void) {   // 0x407d30 grava só o byte baixo de cor·2
     unsigned char w[3] = { 250, 250, 250 }, g3[3] = { 250, 250, 250 };       // cinza: I no máximo 1, sem estouro
     CHECK(ca_fix_wrap(w, g3, 0, 1, 2) == 0 && g3[0] == 250);
 }
+// cor por vértice (partes sem textura): o mesmo ajuste que a paleta recebe
+static void test_adjust(void) {
+    float o[3];
+    const float pele[3] = { .8f, .6f, .45f };
+    ca_adjust(pele, o, 0, 1, 1);                                              // neutro: igual, sem conta
+    CHECK(o[0] == pele[0] && o[1] == pele[1] && o[2] == pele[2]);
+    ca_adjust(pele, o, 0, 1, 1.125);                                          // Brilho padrão: I · 1,125, mesma cor
+    CHECK(NEAR(o[0], .8 * 1.125) && NEAR(o[1], .6 * 1.125) && NEAR(o[2], .45 * 1.125));
+    const float cinza[3] = { .5f, .5f, .5f };
+    ca_adjust(cinza, o, 90, 2, 1);                                            // cinza: matiz e saturação não mudam nada
+    CHECK(NEAR(o[0], .5) && NEAR(o[1], .5) && NEAR(o[2], .5));
+    const float claro[3] = { 1, .8f, .2f };
+    ca_adjust(claro, o, 0, 1, 1.67);                                          // estouro: limitado a 1, como a paleta
+    CHECK(o[0] == 1 && o[1] <= 1 && o[2] >= 0 && o[1] > .8f);
+    // matiz, saturação e brilho juntos: no modelo HSI do jogo, H + 10, S · 1,2 e I · 1,125, como na paleta
+    const float cf[3] = { 180 / 255.f, 140 / 255.f, 110 / 255.f };
+    ca_adjust(cf, o, 10, 1.2, 1.125);
+    double h0, s0, i0, h1, s1, i1;
+    ca_rgb2hsi(cf[0], cf[1], cf[2], &h0, &s0, &i0); ca_rgb2hsi(o[0], o[1], o[2], &h1, &s1, &i1);
+    CHECK(NEAR(h1, h0 + 10) && NEAR(s1, s0 * 1.2) && NEAR(i1, i0 * 1.125));
+}
 
 int main(void) {
-    test_rgb2hsi(); test_roundtrip(); test_fix_wrap();
+    test_rgb2hsi(); test_roundtrip(); test_fix_wrap(); test_adjust();
     printf("%d/%d verificações ok\n", g_run - g_fail, g_run);
     return g_fail != 0;
 }

@@ -137,6 +137,7 @@ Para desinstalar, apague `dinput.dll` (e, se quiser, `bblit2fix.ini` e `bblit2fi
 | `fps` | `[video]` | 0 | Quadros por segundo: 0 = taxa do monitor (de 60 a 240), 31 a 360 = esse valor, 30 = original (sem quadros intermediários) |
 | `fps_jump` | `[video]` | 500 | Distância, em unidades do mundo, a partir da qual um movimento entre dois ticks conta como corte e não é interpolado |
 | `hd_textures` | `[video]` | 1 | Fonte, HUD e desenhos da pausa em 4× (xBR) |
+| `color_untextured` | `[video]` | 1 | Brilho/Saturação/Matiz do menu Vídeo também nas partes com a cor só no vértice (rosto da Vovó, do Piu-Piu e do Pernalonga de uma cor só); 0 = só nas texturas, como o original |
 | `menu_fill` | `[video]` | 3 | Telas 2D: 3 = 16:9 com o fundo continuando até as bordas, 1 = laterais desfocadas, 2 = esticadas, 0 = barras pretas |
 | `menu_hd` | `[video]` | 1 | Usa o pacote HD dos menus (pasta `hd`), se existir |
 | `hud_hd` | `[video]` | 1 | HUD da fase: exporta as texturas para `hd\hud\fonte` e usa o pacote `hd\hud` (gerado pelo `make_pack.py`); 0 = xBR |
@@ -171,12 +172,11 @@ Com `debug=1` (seção `[fix]`), algumas teclas ajudam a comparar: **F9** passa 
 - Com `fps` acima de 30, a imagem fica 1 tick (~33 ms) atrás do jogo. A lógica continua a 30 Hz: animações que o próprio jogo só avança a cada 2 ticks continuam no mesmo ritmo. Os 60 fps só foram testados num PC com monitor de 144 Hz: se em outra máquina algo travar ou tremer, `fps=30` no ini volta ao comportamento original.
 - Ao girar a câmera rápido, um objeto que entra pela borda da tela pode dar um pulinho de 1 tick: o teste de tela dos objetos também comanda o comportamento deles, e por isso não foi alargado (o do cenário foi).
 - Na tela dividida (2 jogadores), os quadros intermediários não são interpolados.
-- No rosto da Vovó e do Piu-Piu, a peça dos olhos sai mais clara que o resto da cabeça (bug conhecido). Vem do desenho do próprio jogo: a peça dos olhos traz a cor da pele na textura e a cabeça recebe a cor por vértice. Já acontecia antes dos 60 fps.
 - DLSS e ray tracing não se aplicam: o jogo usa OpenGL 1.x e projeta a geometria na CPU, como o PlayStation; a placa só recebe triângulos 2D, sem vetores de movimento nem profundidade.
 - Objetos muito distantes ainda obedecem ao limite de ativação do motor (`object_distance`, até 4× o original).
 - Possivelmente o Piu-Piu ainda pode desaparecer e reaparecer com `object_distance` alto (bug conhecido). Ele fica em um ponto de ajuda de cada vez e voa para o ponto onde o Pernalonga está; a 0.12.2 reduziu bastante o problema. Com `debug=1`, o F9 compara com as distâncias originais.
 - Só a versão brasileira do `bblit2.exe` foi mapeada.
-- O "Brilho" do menu Vídeo do jogo realça só as cores das texturas. Acima do meio da barra, o jogo deixava cores claras "darem a volta" e virarem manchas escuras; desde a 0.14 o mod segura essas cores no máximo. Para cores mais vivas, `saturation`/`contrast` em `[postfx]` valem para a imagem inteira.
+- O "Brilho" do menu Vídeo do jogo realça só as cores das paletas das texturas. Acima do meio da barra, o jogo deixava cores claras "darem a volta" e virarem manchas escuras; desde a 0.14 o mod segura essas cores no máximo. As partes com a cor só no vértice (sem textura ou com uma textura toda branca, como a cabeça da Vovó) recebem o mesmo ajuste pelo mod (`color_untextured`). Para cores mais vivas, `saturation`/`contrast` em `[postfx]` valem para a imagem inteira.
 
 ## Como funciona (resumo técnico)
 

@@ -29,8 +29,8 @@
 
 // ---------------------------------------------------------------- config / log
 static struct {
-    int enabled, log_gl, aspect, msaa, vsync, xinput, unlock_joy, a_enter, deadzone, cam_stick, swap_ab, language, game_res, background, debug, inv_stick, inv_trig, draw_dist, ssaa, mipmaps, aniso, actor_dist, auto_quality, lod_dist, force_gl, dump_tex, hd_tex, pad_prompts, menu_fill, hires_menu, menu_pad, menu_hd, hud_probe, center_menus, hud_hd, hud_shadow, fps, fps_jump;
-} cfg = { 1, 1, 2, 4, 1, 1, 0, 1, 30, 1, 0, -1, 1, 1, 0, 1, 1, 400, 2, 1, 16, 200, 1, 400, 1, 0, 1, 2, 1, 1, 1, 1, 0, 1, 1, 45, 0, 500 };
+    int enabled, log_gl, aspect, msaa, vsync, xinput, unlock_joy, a_enter, deadzone, cam_stick, swap_ab, language, game_res, background, debug, inv_stick, inv_trig, draw_dist, ssaa, mipmaps, aniso, actor_dist, auto_quality, lod_dist, force_gl, dump_tex, hd_tex, pad_prompts, menu_fill, hires_menu, menu_pad, menu_hd, hud_probe, center_menus, hud_hd, hud_shadow, fps, fps_jump, color_untex;
+} cfg = { 1, 1, 2, 4, 1, 1, 0, 1, 30, 1, 0, -1, 1, 1, 0, 1, 1, 400, 2, 1, 16, 200, 1, 400, 1, 0, 1, 2, 1, 1, 1, 1, 0, 1, 1, 45, 0, 500, 1 };
 // joystick analógico [pad]: o controle XInput oferecido ao jogo como joystick do DirectInput (live = o jogo abriu)
 static struct { int on, partner, dead, start, outer, outer_r, live; } aj = { 0, 0, 10, 20, 95, 90, 0 };
 // analógico direito no pacote do PS1 (bytes 4/5), escrito por xj_GetDeviceState e lido pelo bbfix_rs_stub
@@ -96,6 +96,7 @@ static void load_config(void) {
     cfg.force_gl  = ini_int("video", "force_opengl", 1);
     cfg.dump_tex  = ini_int("fix", "dump_textures", 0);
     cfg.hd_tex    = ini_int("video", "hd_textures", 1);
+    cfg.color_untex = ini_int("video", "color_untextured", 1);
     cfg.menu_fill = ini_int("video", "menu_fill", 3);
     cfg.menu_hd = ini_int("video", "menu_hd", 1);
     cfg.hud_hd = ini_int("video", "hud_hd", 1);
@@ -300,6 +301,8 @@ static PFN_wglGetProc r_wglGetProcAddress;
 
 static int n_vp, n_sc, n_or, n_fr, n_lm, n_rp, n_ct, n_dp;
 static GLenum g_mode = GL_MODELVIEW;
+static int g_tex2d;   // GL_TEXTURE_2D ligado, pelas chamadas do jogo (e da repetição dos 60 fps)
+static void untex_forget(GLuint nm);
 static void fp_add(int type, int mode, DWORD ptr, DWORD ret, const float *f, int nf);
 enum { FP_ORTHO_ = 4, FP_VIEWPORT_ = 5, FP_CLEAR_ = 6, FP_ENABLE_ = 8, FP_DISABLE_ = 9 };   // = FP_* da medição dos 60 fps
 // ---------------------------------------------------------------- 60 fps (etapa 1): instantâneo do desenho do tick
@@ -436,8 +439,8 @@ static void APIENTRY h_Scissor(GLint x, GLint y, GLsizei w, GLsizei h) {
     LOGN(n_sc, 20, "glScissor(%d,%d,%d,%d)", x, y, w, h);
     map_rect(&x, &y, &w, &h); r_Scissor(x, y, w, h);
 }
-static void APIENTRY h_Enable(GLenum c) { rec(GR_ENABLE, c, 0, 0, NULL, 0); fp_add(FP_ENABLE_, 0, c, (DWORD)__builtin_return_address(0), NULL, 0); if (c == GL_SCISSOR_TEST) g_scissor_on = 1; r_Enable(c); }
-static void APIENTRY h_Disable(GLenum c) { rec(GR_DISABLE, c, 0, 0, NULL, 0); fp_add(FP_DISABLE_, 0, c, (DWORD)__builtin_return_address(0), NULL, 0); if (c == GL_SCISSOR_TEST) g_scissor_on = 0; r_Disable(c); }
+static void APIENTRY h_Enable(GLenum c) { if (c == GL_TEXTURE_2D) g_tex2d = 1; rec(GR_ENABLE, c, 0, 0, NULL, 0); fp_add(FP_ENABLE_, 0, c, (DWORD)__builtin_return_address(0), NULL, 0); if (c == GL_SCISSOR_TEST) g_scissor_on = 1; r_Enable(c); }
+static void APIENTRY h_Disable(GLenum c) { if (c == GL_TEXTURE_2D) g_tex2d = 0; rec(GR_DISABLE, c, 0, 0, NULL, 0); fp_add(FP_DISABLE_, 0, c, (DWORD)__builtin_return_address(0), NULL, 0); if (c == GL_SCISSOR_TEST) g_scissor_on = 0; r_Disable(c); }
 static void APIENTRY h_Ortho(GLdouble l, GLdouble r, GLdouble b, GLdouble t, GLdouble n, GLdouble f) {
     pr_proj = 1;
     { double d[6] = { l, r, b, t, n, f }; rec(GR_ORTHO, 0, 0, 0, d, 6); }
@@ -1901,6 +1904,7 @@ typedef void (APIENTRY *PFN_DelTex)(GLsizei, const GLuint *);
 static PFN_DelTex r_DeleteTextures;
 static void APIENTRY h_DeleteTextures(GLsizei n, const GLuint *t) {
     rec_invalidate();
+    if (t) for (GLsizei i = 0; i < n; i++) untex_forget(t[i]);
     if (t && (g_hd_names_n || g_swap_n || g_sh_n)) {
         int was = 0;
         for (GLsizei i = 0; i < n; i++) { was += hd_is(t[i]); hd_mark(t[i], 0); swap_forget(t[i]); sh_forget(t[i]); }
@@ -1908,7 +1912,31 @@ static void APIENTRY h_DeleteTextures(GLsizei n, const GLuint *t) {
     }
     r_DeleteTextures(n, t);
 }
+// Texturas todas brancas (4x4 no jogo): a cabeça da Vovó, do Piu-Piu e do Pernalonga é desenhada com uma delas, e a cor
+// da pele vem só do vértice (glColor × branco). O ajuste de cor do menu Vídeo não clareia o branco (já no máximo),
+// então para o untex_col elas valem como "sem textura". As peças dos olhos, ao lado, trazem a pele na textura.
+static unsigned char g_tex_white[8192];
+static unsigned short g_ut_w[8192], g_ut_h[8192];   // tamanho enviado pelo jogo
+static void untex_forget(GLuint nm) { if (nm < 8192) g_tex_white[nm] = 0; }
+static void untex_scan(GLenum t, int sub, GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, const void *px) {
+    if (!cfg.color_untex || t != GL_TEXTURE_2D) return;
+    GLint nm = 0; glGetIntegerv(GL_TEXTURE_BINDING_2D, &nm);
+    if (nm <= 0 || nm >= 8192) return;
+    int full = !sub || (x == 0 && y == 0 && w == g_ut_w[nm] && h == g_ut_h[nm]);
+    g_tex_white[nm] = 0;                            // pedaço de textura: deixa de valer como branca
+    if (!sub) { g_ut_w[nm] = (unsigned short)w; g_ut_h[nm] = (unsigned short)h; }
+    if (!full || !px || w <= 0 || h <= 0 || w > 1024 || h > 1024 || !tex_bpp(f, ty)) return;
+    void *tmp; const void *src = tex_gather(w, h, f, ty, px, &tmp);
+    DWORD *o = src ? malloc((size_t)w * h * 4) : NULL;
+    if (o && tex_to_rgba(w, h, f, ty, src, o)) {
+        size_t n = (size_t)w * h, op = 0; int white = 1;
+        for (size_t i = 0; i < n && white; i++) if (o[i] >> 24) { op++; if ((o[i] & 0xffffff) != 0xffffff) white = 0; }
+        g_tex_white[nm] = (unsigned char)(white && op);
+    }
+    free(o); free(tmp);
+}
 static void APIENTRY h_TexImage2D(GLenum t, GLint lv, GLint ifmt, GLsizei w, GLsizei h, GLint b, GLenum f, GLenum ty, const void *px) {
+    if (lv == 0) untex_scan(t, 0, 0, 0, w, h, f, ty, px);
     if (lv == 0 && b == 0 && tex_upload_hd(t, ifmt, w, h, f, ty, px)) {
         static int nd; if (cfg.debug >= 2 && nd++ < 600) logf_("TI %d %dx%d f%04x t%04x i%d px%d HD %016llx", g_dbg_name, w, h, f, ty, ifmt, px != NULL, g_dbg_hash);
         gen_mips(t); return;
@@ -1919,6 +1947,7 @@ static void APIENTRY h_TexImage2D(GLenum t, GLint lv, GLint ifmt, GLsizei w, GLs
     if (lv == 0) gen_mips(t);
 }
 static void APIENTRY h_TexSubImage2D(GLenum t, GLint lv, GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, const void *px) {
+    if (lv == 0) untex_scan(t, 1, x, y, w, h, f, ty, px);
     if (cfg.debug >= 2) { static int nd; GLint nm = 0; glGetIntegerv(GL_TEXTURE_BINDING_2D, &nm); if (nd++ < 300) logf_("TS %d lv%d %d,%d %dx%d f%04x t%04x hd%d", nm, lv, x, y, w, h, f, ty, hd_is((GLuint)nm)); }
     if (lv == 0 && tex_sub_hd(t, x, y, w, h, f, ty, px)) { gen_mips(t); return; }
     r_TexSubImage2D(t, lv, x, y, w, h, f, ty, px);
@@ -2352,6 +2381,31 @@ static void (APIENTRY *r_Color4f)(GLfloat, GLfloat, GLfloat, GLfloat);
 static void (APIENTRY *r_Color4fv)(const GLfloat *);
 static void (APIENTRY *r_Color3f)(GLfloat, GLfloat, GLfloat);
 static void (APIENTRY *r_Color3ub)(GLubyte, GLubyte, GLubyte);
+// Partes com a cor só no vértice: o ajuste de matiz/saturação/brilho do menu Vídeo, que o jogo só faz nas paletas
+// (0x407d30), vale também para elas. São as desenhadas sem textura (glDisable(GL_TEXTURE_2D), 0x4242fa) e as com uma
+// textura toda branca (a cabeça da Vovó, do Piu-Piu e do Pernalonga; ver untex_scan). Sem isso, com o Brilho padrão
+// (1,125) a peça dos olhos, que traz a cor da pele na textura, saía mais clara que a cabeça. A cor de cada vértice vem
+// por glColor3fv/glColor3f. A cor gravada para os 60 fps já é a ajustada; a repetição entra pelo glColor4f, que não
+// ajusta de novo.
+static const GLfloat *untex_col(const GLfloat *in, GLfloat *buf) {
+    if (!cfg.color_untex) return in;
+    int white = g_tex2d && pr_tex < 8192 && g_tex_white[pr_tex];
+    if (g_tex2d && !white) return in;
+    double hue = *(volatile double *)0x63a050, sat = *(volatile double *)0x63a058, val = *(volatile double *)0x63a060;
+    if ((hue == 0 && sat == 1 && val == 1) || !(val > 0) || !(sat >= 0)) return in;   // neutro, ou config.pc ainda não lido
+    static double ch, cs, cv;
+    static struct { GLfloat k[3], v[3]; int ok; } cache[1024];                 // poucas cores diferentes por quadro
+    if (hue != ch || sat != cs || val != cv) {
+        memset(cache, 0, sizeof cache); ch = hue; cs = sat; cv = val;
+        static int nl; if (nl++ < 5) logf_("cores sem textura com o ajuste do menu Video (matiz %.0f, saturacao %.2f, brilho %.2f)", hue, sat, val);
+    }
+    DWORD a, b, c; memcpy(&a, in, 4); memcpy(&b, in + 1, 4); memcpy(&c, in + 2, 4);
+    unsigned k = ((a * 73856093u) ^ (b * 19349663u) ^ (c * 83492791u)) >> 22;
+    if (cache[k].ok && !memcmp(cache[k].k, in, sizeof cache[k].k)) { memcpy(buf, cache[k].v, sizeof cache[k].v); return buf; }
+    ca_adjust(in, buf, hue, sat, val);
+    memcpy(cache[k].k, in, sizeof cache[k].k); memcpy(cache[k].v, buf, sizeof cache[k].v); cache[k].ok = 1;
+    return buf;
+}
 static void pr_tcx(float s0, float t0) { pr_count(PR_TCX); pr_cur_tc[0] = s0; pr_cur_tc[1] = t0; }
 static void pr_color(float r, float g, float b, float a) { pr_count(PR_COLOR); pr_col[0] = r; pr_col[1] = g; pr_col[2] = b; pr_col[3] = a; }
 static void APIENTRY h_TexCoord2d(GLdouble a, GLdouble b) { rec_tc(a, b, 0, 1); pr_tcx((float)a, (float)b); r_TexCoord2d(a, b); }
@@ -2366,9 +2420,9 @@ static void APIENTRY h_Color4ub(GLubyte r, GLubyte g, GLubyte b, GLubyte a) { re
 static void APIENTRY h_Color4ubv(const GLubyte *p) { rec_col(p[0] / 255.f, p[1] / 255.f, p[2] / 255.f, p[3] / 255.f); pr_color(p[0] / 255.f, p[1] / 255.f, p[2] / 255.f, p[3] / 255.f); r_Color4ubv(p); }
 static void APIENTRY h_Color4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a) { rec_col(r, g, b, a); pr_color(r, g, b, a); r_Color4f(r, g, b, a); }
 static void APIENTRY h_Color4fv(const GLfloat *p) { rec_col(p[0], p[1], p[2], p[3]); pr_color(p[0], p[1], p[2], p[3]); r_Color4fv(p); }
-static void APIENTRY h_Color3f(GLfloat r, GLfloat g, GLfloat b) { rec_col(r, g, b, 1); pr_color(r, g, b, 1); r_Color3f(r, g, b); }
+static void APIENTRY h_Color3f(GLfloat r, GLfloat g, GLfloat b) { GLfloat in[3] = { r, g, b }, t[3]; const GLfloat *p = untex_col(in, t); r = p[0]; g = p[1]; b = p[2]; rec_col(r, g, b, 1); pr_color(r, g, b, 1); r_Color3f(r, g, b); }
 static void (APIENTRY *r_Color3fv)(const GLfloat *);
-static void APIENTRY h_Color3fv(const GLfloat *p) { rec_col(p[0], p[1], p[2], 1); pr_color(p[0], p[1], p[2], 1); r_Color3fv(p); }
+static void APIENTRY h_Color3fv(const GLfloat *p) { GLfloat t[3]; p = untex_col(p, t); rec_col(p[0], p[1], p[2], 1); pr_color(p[0], p[1], p[2], 1); r_Color3fv(p); }
 static void APIENTRY h_Color3ub(GLubyte r, GLubyte g, GLubyte b) { rec_col(r / 255.f, g / 255.f, b / 255.f, 1); pr_color(r / 255.f, g / 255.f, b / 255.f, 1); r_Color3ub(r, g, b); }
 static void APIENTRY h_Vertex2f(GLfloat x, GLfloat y) { rec_vtx(NULL, x, y, 0, 1); pr_count(PR_V2F); pr_vert(x, y, 0, 1); if (!sh_vtx(x, y, 0)) r_Vertex2f(x, y); }
 static void APIENTRY h_Vertex2fv(const GLfloat *p) { rec_vtx(p, p[0], p[1], 0, 1); pr_count(PR_V2FV); pr_vert(p[0], p[1], 0, 1); if (!sh_vtx(p[0], p[1], 0)) r_Vertex2fv(p); }
@@ -2801,6 +2855,9 @@ static struct { const char *name; void **real; void *hook; } gl_probe_hooks[] = 
 static struct { const char *name; void **real; void *hook; } gl_rec_hooks[] = {   // 60 fps (fps > 30) e medição do F5 (debug)
     H(Color3fv), H(BlendFunc), H(AlphaFunc), H(DepthFunc), H(DepthRange), H(ShadeModel), H(PolygonMode), H(Hint), H(ClearColor), H(LoadIdentity),
 };
+static struct { const char *name; void **real; void *hook; } gl_color_hooks[] = {   // color_untextured
+    H(Color3fv), H(Color3f), H(BindTexture),
+};
 #undef H
 
 static HMODULE WINAPI h_LoadLibraryA(LPCSTR name) {
@@ -2819,6 +2876,9 @@ static FARPROC WINAPI h_GetProcAddress(HMODULE m, LPCSTR name) {
     if (name[0] == 'g' && name[1] == 'l' && name[2] != 'u') {
         for (size_t i = 0; i < sizeof gl_hooks / sizeof *gl_hooks; i++)
             if (!strcmp(name + 2, gl_hooks[i].name)) { *gl_hooks[i].real = (void *)p; return (FARPROC)gl_hooks[i].hook; }
+        if (cfg.color_untex)
+            for (size_t i = 0; i < sizeof gl_color_hooks / sizeof *gl_color_hooks; i++)
+                if (!strcmp(name + 2, gl_color_hooks[i].name)) { *gl_color_hooks[i].real = (void *)p; return (FARPROC)gl_color_hooks[i].hook; }
         if (cfg.debug || cfg.fps > 30)
             for (size_t i = 0; i < sizeof gl_rec_hooks / sizeof *gl_rec_hooks; i++)
                 if (!strcmp(name + 2, gl_rec_hooks[i].name)) { *gl_rec_hooks[i].real = (void *)p; return (FARPROC)gl_rec_hooks[i].hook; }
