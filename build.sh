@@ -22,9 +22,11 @@ gcc -std=c11 -O2 -Wall -Wextra -Wredundant-decls -o build/test_interp tests/test
 build/test_interp
 gcc -std=c11 -O2 -Wall -Wextra -Wredundant-decls -o build/test_coloradj tests/test_coloradj.c src/coloradj.c -lm
 build/test_coloradj
+gcc -std=c11 -O2 -Wall -Wextra -Wredundant-decls -o build/test_matfix tests/test_matfix.c src/matfix.c -lm
+build/test_matfix
 i686-w64-mingw32-gcc -std=c11 -O2 -msse2 -mfpmath=sse -Wall -Wextra -Wredundant-decls -Wno-unused-parameter -Wno-cast-function-type -Wno-misleading-indentation \
     -shared -static-libgcc -Wl,--enable-stdcall-fixup \
-    -o build/dinput.dll src/bbfix.c src/hud_math.c src/pad_cursor.c src/pad_icons.c src/menu_center.c src/stick_shape.c src/glrec.c src/pacer.c src/interp.c src/coloradj.c src/dinput.def -lopengl32 -lgdi32 -luser32 -ladvapi32
+    -o build/dinput.dll src/bbfix.c src/hud_math.c src/pad_cursor.c src/pad_icons.c src/menu_center.c src/stick_shape.c src/glrec.c src/pacer.c src/interp.c src/coloradj.c src/matfix.c src/dinput.def -lopengl32 -lgdi32 -luser32 -ladvapi32
 i686-w64-mingw32-strip build/dinput.dll
 cp dist/bblit2fix.ini build/
 ls -la build/

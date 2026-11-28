@@ -23,14 +23,15 @@
 #include "glrec.h"
 #include "pacer.h"
 #include "interp.h"
+#include "matfix.h"
 #include "coloradj.h"
 
 #define FIX_VERSION "0.14"
 
 // ---------------------------------------------------------------- config / log
 static struct {
-    int enabled, log_gl, aspect, msaa, vsync, xinput, unlock_joy, a_enter, deadzone, cam_stick, swap_ab, language, game_res, background, debug, inv_stick, inv_trig, draw_dist, ssaa, mipmaps, aniso, actor_dist, auto_quality, lod_dist, force_gl, dump_tex, hd_tex, pad_prompts, menu_fill, hires_menu, menu_pad, menu_hd, hud_probe, center_menus, hud_hd, hud_shadow, fps, fps_jump;
-} cfg = { 1, 1, 2, 4, 1, 1, 0, 1, 30, 1, 0, -1, 1, 1, 0, 1, 1, 400, 2, 1, 16, 200, 1, 400, 1, 0, 1, 2, 1, 1, 1, 1, 0, 1, 1, 45, 0, 500 };
+    int enabled, log_gl, aspect, msaa, vsync, xinput, unlock_joy, a_enter, deadzone, cam_stick, swap_ab, language, game_res, background, debug, inv_stick, inv_trig, draw_dist, ssaa, mipmaps, aniso, actor_dist, auto_quality, lod_dist, force_gl, dump_tex, hd_tex, pad_prompts, menu_fill, hires_menu, menu_pad, menu_hd, hud_probe, center_menus, hud_hd, hud_shadow, fps, fps_jump, model_fix;
+} cfg = { 1, 1, 2, 4, 1, 1, 0, 1, 30, 1, 0, -1, 1, 1, 0, 1, 1, 400, 2, 1, 16, 200, 1, 400, 1, 0, 1, 2, 1, 1, 1, 1, 0, 1, 1, 45, 0, 500, 1 };
 // joystick analógico [pad]: o controle XInput oferecido ao jogo como joystick do DirectInput (live = o jogo abriu)
 static struct { int on, partner, dead, start, outer, outer_r, live; } aj = { 0, 0, 10, 20, 95, 90, 0 };
 // analógico direito no pacote do PS1 (bytes 4/5), escrito por xj_GetDeviceState e lido pelo bbfix_rs_stub
@@ -65,6 +66,7 @@ static void load_config(void) {
     cfg.vsync     = ini_int("video", "vsync", 1);
     cfg.fps       = ini_int("video", "fps", 0);
     cfg.fps_jump  = ini_int("video", "fps_jump", 500);
+    cfg.model_fix = ini_int("video", "model_matrix_fix", 1);
     cfg.xinput    = ini_int("pad", "xinput", 1);
     cfg.unlock_joy= ini_int("pad", "unlock_dinput_joystick", 0);
     cfg.a_enter   = ini_int("pad", "a_is_enter", 1);
@@ -2777,6 +2779,49 @@ static void install_tags(void) {
     for (size_t i = 0; i < sizeof walks / sizeof *walks; i++) wk &= patch_call(walks[i], 0x4052b0, (void *)bbfix_walk);
     logf_("fps: corte do cenario alargado (x%.2f, y%.2f) %s", WALK_FX, WALK_FY, wk ? "ligado" : "com falha");
 }
+// ---------------------------------------------------------------- matriz dos modelos sem estouro (model_matrix_fix)
+// A câmera do jogo (0x639e60; 0x63a180 no outro caminho) já traz a escala de tela, que cresce com a resolução (em 4K
+// a linha y passa de 5). Palmeiras, pedras que quebram e outros objetos ficam embaixo de um nó com escala própria
+// (2×): câmera × nó passa de 8,0, e MulMatrix0 (0x4048b0) guarda cada termo em short 4.12. O valor dá a volta
+// (−11,3 vira +4,7) e a malha do nó sai virada e achatada, com a posição do nó certa (32 bits): o tronco da palmeira
+// vira um toco com as folhas soltas no alto, a pedra mostra só as faces de dentro, embaixo. Acontece sem o mod, em
+// resolução alta (o jogo foi feito para 640×480). Os invólucros de 0x405820/0x405920 (matriz do nó na câmera)
+// refazem o produto em 64 bits (mf_unwrap); se houve volta, a conversão para float (0x404c30), que é a matriz usada
+// nos vértices, recebe a rotação certa. Sem volta nada muda.
+static struct { const BYTE *ptr; short r[9]; float f[9]; } g_mf;
+static long g_mf_n;
+static void mf_note(const BYTE *cam, const BYTE *node, const BYTE *out) {
+    g_mf.ptr = NULL;
+    if (mf_unwrap((const short *)cam, (const short *)(node + 0x24), (const short *)out, g_mf.f)) {
+        memcpy(g_mf.r, out, sizeof g_mf.r); g_mf.ptr = out;
+    }
+}
+static int __cdecl bbfix_node_cam(BYTE *node, BYTE *out, void *chain) {     // 0x405820(nó, saída, pilha de pais)
+    int r = ((int (__cdecl *)(BYTE *, BYTE *, void *))0x405820)(node, out, chain);
+    if (r) mf_note((const BYTE *)0x639e60, node, out);
+    return r;
+}
+static int __cdecl bbfix_node_cam2(BYTE *node, BYTE *out, void *chain) {    // 0x405920: o mesmo com a câmera 0x63a180
+    int r = ((int (__cdecl *)(BYTE *, BYTE *, void *))0x405920)(node, out, chain);
+    if (r) mf_note((const BYTE *)0x63a180, node, out);
+    return r;
+}
+static void __cdecl bbfix_load_mat(const BYTE *m) {                         // 0x404c30: MATRIX -> floats em 0x63c020
+    ((void (__cdecl *)(const BYTE *))0x404c30)(m);
+    if (g_mf.ptr == m && !memcmp(m, g_mf.r, sizeof g_mf.r)) {   // a mesma rotação (a translação pode ter mudado)
+        memcpy((void *)0x63c020, g_mf.f, sizeof g_mf.f);
+        if (g_mf_n++ == 0) logf_("matriz dos modelos: primeiro estouro corrigido");
+    }
+}
+static void install_model_fix(void) {
+    if (!cfg.model_fix) return;
+    static const DWORD node[] = { 0x464686, 0x465765, 0x46585d, 0x469aa0 }, load[] = { 0x4646c0, 0x465782, 0x465863, 0x469aff };
+    int n = 0;
+    for (size_t i = 0; i < 4; i++) n += patch_call(node[i], 0x405820, (void *)bbfix_node_cam);
+    n += patch_call(0x4533d8, 0x405920, (void *)bbfix_node_cam2);
+    for (size_t i = 0; i < 4; i++) n += patch_call(load[i], 0x404c30, (void *)bbfix_load_mat);
+    logf_("matriz dos modelos sem estouro: %d de 9 chamadas", n);
+}
 static void install_pacer(void) {
     if (!g_rec_on) return;
     char r[5]; DWORD rel = (DWORD)(ULONG_PTR)bbfix_pacer - (0x4013a1 + 5);
@@ -5325,6 +5370,7 @@ static void init(HMODULE self) {
     install_widescreen();
     install_draw_distance();
     install_object_hooks();
+    install_model_fix();
     hd_load_list();
     {   char d[MAX_PATH]; snprintf(d, sizeof d, "%s\\hd", g_dir); DWORD at = GetFileAttributesA(d);
         g_hud_dir = at != INVALID_FILE_ATTRIBUTES && (at & FILE_ATTRIBUTE_DIRECTORY);
