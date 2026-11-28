@@ -1,5 +1,8 @@
 # Histórico de versões
 
+## Próxima versão
+- **Correção**: em resolução alta (visto em 4K), as palmeiras viravam um toco com as folhas soltas no alto e as pedras que quebram (Moon Valley) mostravam só uma faixa escura embaixo, piscando. Acontecia também sem o mod. A câmera do jogo já traz a escala da tela, e esses objetos têm escala própria (2×): o produto passava do limite de 16 bits da matriz do jogo e "dava a volta", virando e achatando a malha. O mod refaz a conta sem o limite (`[video] model_matrix_fix`, padrão 1; 0 = como o original).
+
 ## 0.14
 - **Movimento suave a 60, 120, 144 fps ou na taxa do monitor** (`[video] fps`, padrão 0 = taxa do monitor, de 60 a 240; 31 a 360 = valor fixo; 30 = original). A lógica do jogo continua a 30 por segundo; o mod grava o desenho de cada tick e mostra quadros intermediários com cenário, câmera, personagens, objetos, sombras e efeitos 2D em posições interpoladas. A imagem fica 1 tick (~33 ms) atrás do jogo, como no [BBLIT Remaster](https://github.com/InLineR495/BBLIT-Remaster), de onde vêm a ideia e a regra de salto (`fps_jump`). Cortes de câmera, teletransportes e a tela dividida não são interpolados.
 - **Correção**: com o "Brilho" do menu Vídeo acima do meio, cores claras das texturas "davam a volta" e viravam manchas escuras; agora ficam no máximo.
